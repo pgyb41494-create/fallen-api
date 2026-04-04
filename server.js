@@ -14,10 +14,19 @@ const API_KEY = process.env.API_KEY || '';
 app.use(cors());
 app.use(express.json());
 
+// Session storage (declared early so requireKey can use it)
+const sessions = new Map();
+
 // Simple API key guard for internal routes
 function requireKey(req, res, next) {
-    if (API_KEY && req.headers['x-api-key'] !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
-    next();
+    // Accept API key (bot → API calls)
+    if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
+    // Accept session token (dashboard → API calls)
+    const token = (req.headers.authorization || '').replace('Bearer ', '');
+    if (token && sessions.get(token)) return next();
+    // If no API_KEY is set, allow all (dev mode)
+    if (!API_KEY) return next();
+    return res.status(401).json({ error: 'Unauthorized' });
 }
 
 // ── Database Setup ───────────────────────────────────────────
@@ -199,8 +208,7 @@ app.get('/auth/callback', async (req, res) => {
     }
 });
 
-// Session storage
-const sessions = new Map();
+// Session storage (see top of file)
 
 // Get authenticated user
 app.get('/auth/user', async (req, res) => {

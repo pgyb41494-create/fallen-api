@@ -105,6 +105,9 @@ app.patch('/api/guilds/:guildId/config', requireKey, (req, res) => {
         ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`)
         .run(guildId, JSON.stringify(cfg));
     res.json({ ok: true, config: cfg });
+    // Debug logging for PATCH
+    console.log('[PATCH /api/guilds/:guildId/config] Headers:', req.headers);
+    console.log('[PATCH /api/guilds/:guildId/config] Body:', req.body);
 });
 
 // ═══════════════════════════════════════════════════════════════

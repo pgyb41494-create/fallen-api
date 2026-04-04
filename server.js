@@ -230,8 +230,11 @@ app.get('/auth/guilds', async (req, res) => {
     try {
         const r = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${session.token}` } });
         const guilds = await r.json();
-        // Filter to guilds where user has MANAGE_GUILD
-        const managed = guilds.filter(g => (g.permissions & 0x20) === 0x20);
+        // Filter to guilds where user has MANAGE_GUILD (0x20) or ADMINISTRATOR (0x8)
+        const managed = guilds.filter(g => {
+            const perms = BigInt(g.permissions);
+            return (perms & 0x8n) === 0x8n || (perms & 0x20n) === 0x20n;
+        });
         res.json({ guilds: managed });
     } catch { res.status(401).json({ error: 'Token invalid' }); }
 });

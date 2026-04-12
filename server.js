@@ -7,12 +7,16 @@ const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
 const path = require('path');
+const fs = require('fs');
 const EventEmitter = require('events');
 
 const app = express();
 const PORT = process.env.PORT || 3200;
 const API_KEY = process.env.API_KEY || '';
+const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const eventEmitter = new EventEmitter();
+
+try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { console.warn('[FS API] Could not create DATA_DIR:', e.message); }
 
 // ── Middleware ────────────────────────────────────────────────
 app.use(cors());
@@ -34,7 +38,7 @@ function requireKey(req, res, next) {
 }
 
 // ── Database Setup ───────────────────────────────────────────
-const dbPath = process.env.DATABASE_PATH || path.join(__dirname, 'fallen.db');
+const dbPath = process.env.DATABASE_PATH || path.join(DATA_DIR, 'fallen.db');
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');

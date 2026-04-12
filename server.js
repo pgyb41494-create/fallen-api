@@ -157,6 +157,27 @@ app.get('/api/guilds/:guildId/panels', requireKey, (req, res) => {
     res.json({ panels: cfg.panels || [] });
 });
 
+// Get Discord guild roles, channels, and categories for the selected server
+app.get('/api/guilds/:guildId/discord', requireKey, async (req, res) => {
+    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Discord bot token not configured' });
+    const guildId = req.params.guildId;
+    try {
+        const [rolesRes, channelsRes] = await Promise.all([
+            fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
+            fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
+        ]);
+        if (!rolesRes.ok) return res.status(rolesRes.status).json({ error: 'Failed to fetch roles' });
+        if (!channelsRes.ok) return res.status(channelsRes.status).json({ error: 'Failed to fetch channels' });
+        const roles = await rolesRes.json();
+        const channels = await channelsRes.json();
+        const categories = channels.filter(c => c.type === 4);
+        res.json({ roles, channels, categories });
+    } catch (err) {
+        console.error('[Discord] fetch guild data failed:', err);
+        res.status(500).json({ error: 'Failed to fetch guild data' });
+    }
+});
+
 // Preview a panel payload
 app.post('/api/guilds/:guildId/panels/preview', requireKey, (req, res) => {
     const panel = req.body.panel;

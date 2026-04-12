@@ -1,7 +1,7 @@
 // Redeploy test: trivial comment for Railway
 
 // ═══════════════════════════════════════════════════════════════
-//  Fallen Bot API — Express + SQLite
+//  FS Bot API — Express + SQLite
 // ═══════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
@@ -365,7 +365,7 @@ app.get('/api/stats', (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 //  HEALTH
 // ═══════════════════════════════════════════════════════════════
-app.get('/', (_, res) => res.json({ status: 'ok', name: 'Fallen Bot API', version: '1.0.0' }));
+app.get('/', (_, res) => res.json({ status: 'ok', name: 'FS Bot API', version: '1.0.0' }));
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
 // ═══════════════════════════════════════════════════════════════

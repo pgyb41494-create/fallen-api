@@ -167,6 +167,23 @@ app.post('/api/guilds/:guildId/panels/preview', requireKey, (req, res) => {
     });
 });
 
+// Publish a ticket panel via bot
+app.post('/api/guilds/:guildId/panels/publish', requireKey, (req, res) => {
+    const { panel, channelId } = req.body;
+    if (!panel || !channelId) return res.status(400).json({ error: 'Panel and channelId are required' });
+    const guildId = req.params.guildId;
+    const existing = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
+    let cfg = {};
+    if (existing) { try { cfg = JSON.parse(existing.config); } catch {} }
+    cfg.pendingTicketPanel = { panel, channelId, createdAt: new Date().toISOString() };
+    db.prepare(`INSERT INTO guild_configs (guild_id, config, updated_at) VALUES (?, ?, datetime('now'))
+        ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`)
+        .run(guildId, JSON.stringify(cfg));
+    eventEmitter.emit(`guild:${guildId}:event`, { event: 'ticket.panel.publish', payload: { guildId, panel, channelId } });
+    dispatchWebhooks(guildId, 'ticket.panel.publish', { guildId, panel, channelId });
+    res.json({ ok: true, pending: true });
+});
+
 // Register a webhook for config events
 app.post('/api/guilds/:guildId/webhooks', requireKey, (req, res) => {
     const { url, event } = req.body;

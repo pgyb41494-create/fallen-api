@@ -13,7 +13,7 @@ const EventEmitter = require('events');
 const app = express();
 const PORT = process.env.PORT || 3200;
 const API_KEY = process.env.API_KEY || '';
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || process.env.BOT_TOKEN || process.env.TOKEN || '';
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const eventEmitter = new EventEmitter();
 
@@ -160,7 +160,7 @@ app.get('/api/guilds/:guildId/panels', requireKey, (req, res) => {
 
 // Get Discord guild roles, channels, and categories for the selected server
 app.get('/api/guilds/:guildId/discord', requireKey, async (req, res) => {
-    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Discord bot token not configured' });
+    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Discord bot token not configured (set BOT_TOKEN or DISCORD_BOT_TOKEN)' });
     const guildId = req.params.guildId;
     try {
         const [rolesRes, channelsRes] = await Promise.all([

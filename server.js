@@ -13,6 +13,7 @@ const EventEmitter = require('events');
 const app = express();
 const PORT = process.env.PORT || 3200;
 const API_KEY = process.env.API_KEY || '';
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const eventEmitter = new EventEmitter();
 

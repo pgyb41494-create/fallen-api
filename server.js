@@ -9,11 +9,16 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const EventEmitter = require('events');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3200;
 const API_KEY = process.env.API_KEY || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || process.env.BOT_TOKEN || process.env.TOKEN || '';
+const DISCORD_CLIENT_ID = process.env.CLIENT_ID || '';
+const DISCORD_CLIENT_SECRET = process.env.CLIENT_SECRET || '';
+const REDIRECT_URI = process.env.REDIRECT_URI || '';
+const WEBSITE_URL = process.env.WEBSITE_URL || 'http://localhost:5173';
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const eventEmitter = new EventEmitter();
 
@@ -23,16 +28,71 @@ try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 app.use(cors());
 app.use(express.json());
 
-// Session storage (declared early so requireKey can use it)
-const sessions = new Map();
+// Session storage helpers
+function getSession(sessionId) {
+    return db.prepare('SELECT * FROM oauth_sessions WHERE session_id = ?').get(sessionId);
+}
+
+function saveSession(sessionId, data) {
+    db.prepare(`INSERT INTO oauth_sessions (session_id, access_token, refresh_token, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            expires_at = excluded.expires_at
+    `).run(sessionId, data.access_token, data.refresh_token, data.expires_at, data.created_at);
+}
+
+function deleteSession(sessionId) {
+    db.prepare('DELETE FROM oauth_sessions WHERE session_id = ?').run(sessionId);
+}
+
+async function refreshDiscordSession(sessionId, session) {
+    if (!session || !session.refresh_token) return null;
+    try {
+        const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: DISCORD_CLIENT_ID,
+                client_secret: DISCORD_CLIENT_SECRET,
+                grant_type: 'refresh_token',
+                refresh_token: session.refresh_token,
+            }),
+        });
+        const tokenData = await tokenRes.json();
+        if (!tokenData.access_token) return null;
+
+        const expiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000;
+        saveSession(sessionId, {
+            access_token: tokenData.access_token,
+            refresh_token: tokenData.refresh_token || session.refresh_token,
+            expires_at: expiresAt,
+            created_at: new Date().toISOString(),
+        });
+        return getSession(sessionId);
+    } catch (err) {
+        console.error('[Auth] refresh session failed:', err);
+        return null;
+    }
+}
+
+async function getValidSession(sessionId) {
+    const session = getSession(sessionId);
+    if (!session) return null;
+    if (session.expires_at && Date.now() > session.expires_at) {
+        return await refreshDiscordSession(sessionId, session);
+    }
+    return session;
+}
 
 // Simple API key guard for internal routes
-function requireKey(req, res, next) {
+async function requireKey(req, res, next) {
     // Accept API key (bot → API calls)
     if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
     // Accept session token (dashboard → API calls)
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    if (token && sessions.get(token)) return next();
+    if (token && getSession(token)) return next();
     // If no API_KEY is set, allow all (dev mode)
     if (!API_KEY) return next();
     return res.status(401).json({ error: 'Unauthorized' });
@@ -49,6 +109,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS guild_configs (
     guild_id TEXT PRIMARY KEY,
     config TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT DEFAULT (datetime('now'))
+)`);
+
+db.exec(`CREATE TABLE IF NOT EXISTS oauth_sessions (
+    session_id TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+    expires_at INTEGER,
+    created_at TEXT DEFAULT (datetime('now'))
 )`);
 
 // Moderation logs
@@ -325,11 +393,6 @@ app.delete('/api/guilds/:guildId/warns/:userId', requireKey, (req, res) => {
 //  DASHBOARD ROUTES (OAuth2)
 // ═══════════════════════════════════════════════════════════════
 
-const DISCORD_CLIENT_ID = process.env.CLIENT_ID || '';
-const DISCORD_CLIENT_SECRET = process.env.CLIENT_SECRET || '';
-const REDIRECT_URI = process.env.REDIRECT_URI || '';
-const WEBSITE_URL = process.env.WEBSITE_URL || 'http://localhost:5173';
-
 // OAuth2 login redirect
 app.get('/auth/login', (req, res) => {
     const scopes = 'identify guilds';
@@ -353,9 +416,14 @@ app.get('/auth/callback', async (req, res) => {
         const tokenData = await tokenRes.json();
         if (!tokenData.access_token) return res.status(400).json({ error: 'Failed to get token' });
 
-        // Store token in simple in-memory sessions (for production, use a proper session store)
-        const sessionId = require('crypto').randomBytes(32).toString('hex');
-        sessions.set(sessionId, { token: tokenData.access_token, refresh: tokenData.refresh_token, expires: Date.now() + tokenData.expires_in * 1000 });
+        // Store token in SQLite so login survives restarts and token refresh.
+        const sessionId = crypto.randomBytes(32).toString('hex');
+        saveSession(sessionId, {
+            access_token: tokenData.access_token,
+            refresh_token: tokenData.refresh_token,
+            expires_at: Date.now() + tokenData.expires_in * 1000,
+            created_at: new Date().toISOString(),
+        });
 
         res.redirect(`${WEBSITE_URL}/dashboard.html?token=${sessionId}`);
     } catch (err) {
@@ -369,22 +437,24 @@ app.get('/auth/callback', async (req, res) => {
 // Get authenticated user
 app.get('/auth/user', async (req, res) => {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const session = sessions.get(token);
+    const session = await getValidSession(token);
     if (!session) return res.status(401).json({ error: 'Not authenticated' });
     try {
-        const r = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${session.token}` } });
+        const r = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${session.access_token}` } });
         const user = await r.json();
         res.json(user);
-    } catch { res.status(401).json({ error: 'Token invalid' }); }
+    } catch {
+        res.status(401).json({ error: 'Token invalid' });
+    }
 });
 
 // Get user's guilds
 app.get('/auth/guilds', async (req, res) => {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const session = sessions.get(token);
+    const session = await getValidSession(token);
     if (!session) return res.status(401).json({ error: 'Not authenticated' });
     try {
-        const r = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${session.token}` } });
+        const r = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${session.access_token}` } });
         const guilds = await r.json();
         // Filter to guilds where user has MANAGE_GUILD (0x20) or ADMINISTRATOR (0x8)
         const managed = guilds.filter(g => {

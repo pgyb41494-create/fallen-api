@@ -7,10 +7,12 @@ const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
 const path = require('path');
+const EventEmitter = require('events');
 
 const app = express();
 const PORT = process.env.PORT || 3200;
 const API_KEY = process.env.API_KEY || '';
+const eventEmitter = new EventEmitter();
 
 // ── Middleware ────────────────────────────────────────────────
 app.use(cors());
@@ -82,11 +84,25 @@ db.exec(`CREATE TABLE IF NOT EXISTS tickets (
     closed_at TEXT
 )`);
 
-console.log('[DB] Tables initialized');
+// Webhook registrations for config events
+ db.exec(`CREATE TABLE IF NOT EXISTS webhooks (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     guild_id TEXT NOT NULL,
+     url TEXT NOT NULL,
+     event TEXT NOT NULL,
+     created_at TEXT DEFAULT (datetime('now'))
+ )`);
 
-// ═══════════════════════════════════════════════════════════════
-//  GUILD CONFIG ROUTES
-// ═══════════════════════════════════════════════════════════════
+function dispatchWebhooks(guildId, event, payload) {
+    const hooks = db.prepare('SELECT url FROM webhooks WHERE guild_id = ? AND event = ?').all(guildId, event);
+    for (const hook of hooks) {
+        fetch(hook.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ guildId, event, payload }),
+        }).catch(err => console.error('[Webhook] Dispatch failed', hook.url, err.message));
+    }
+}
 
 // Get guild config
 app.get('/api/guilds/:guildId/config', (req, res) => {
@@ -94,6 +110,99 @@ app.get('/api/guilds/:guildId/config', (req, res) => {
     if (!row) return res.json({});
     try { res.json(JSON.parse(row.config)); }
     catch { res.json({}); }
+});
+
+// Get list of linked guilds and saved configs
+app.get('/api/guilds', requireKey, (req, res) => {
+    const rows = db.prepare('SELECT guild_id, config, updated_at FROM guild_configs ORDER BY updated_at DESC').all();
+    const guilds = rows.map(row => ({
+        guildId: row.guild_id,
+        updatedAt: row.updated_at,
+        config: (() => { try { return JSON.parse(row.config); } catch { return {}; } })(),
+    }));
+    res.json({ guilds });
+});
+
+// Get guild state summary
+app.get('/api/guilds/:guildId/state', requireKey, (req, res) => {
+    const row = db.prepare('SELECT guild_id, config, updated_at FROM guild_configs WHERE guild_id = ?').get(req.params.guildId);
+    const state = {
+        guildId: req.params.guildId,
+        linked: !!row,
+        updatedAt: row?.updated_at || null,
+        config: row ? (() => { try { return JSON.parse(row.config); } catch { return {}; } })() : {},
+    };
+    res.json(state);
+});
+
+// Get guild stats
+app.get('/api/guilds/:guildId/stats', requireKey, (req, res) => {
+    const guildId = req.params.guildId;
+    const warnCount = db.prepare('SELECT COUNT(*) AS c FROM warnings WHERE guild_id = ?').get(guildId).c;
+    const modCount = db.prepare('SELECT COUNT(*) AS c FROM mod_logs WHERE guild_id = ?').get(guildId).c;
+    const ticketCount = db.prepare('SELECT COUNT(*) AS c FROM tickets WHERE guild_id = ?').get(guildId).c;
+    res.json({ guildId, warns: warnCount, modActions: modCount, tickets: ticketCount });
+});
+
+// Get saved panels for a guild
+app.get('/api/guilds/:guildId/panels', requireKey, (req, res) => {
+    const row = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(req.params.guildId);
+    if (!row) return res.json({ panels: [] });
+    let cfg = {};
+    try { cfg = JSON.parse(row.config); } catch {}
+    res.json({ panels: cfg.panels || [] });
+});
+
+// Preview a panel payload
+app.post('/api/guilds/:guildId/panels/preview', requireKey, (req, res) => {
+    const panel = req.body.panel;
+    if (!panel) return res.status(400).json({ error: 'Panel payload required' });
+    res.json({
+        guildId: req.params.guildId,
+        preview: {
+            title: panel.title || 'Panel Preview',
+            description: panel.description || 'This is a preview of your panel configuration.',
+            fields: panel.fields || [],
+        },
+    });
+});
+
+// Register a webhook for config events
+app.post('/api/guilds/:guildId/webhooks', requireKey, (req, res) => {
+    const { url, event } = req.body;
+    if (!url || !event) return res.status(400).json({ error: 'Missing url or event' });
+    const r = db.prepare('INSERT INTO webhooks (guild_id, url, event) VALUES (?, ?, ?)').run(req.params.guildId, url, event);
+    res.json({ ok: true, webhookId: r.lastInsertRowid });
+});
+
+// List webhooks for a guild
+app.get('/api/guilds/:guildId/webhooks', requireKey, (req, res) => {
+    const hooks = db.prepare('SELECT id, url, event, created_at FROM webhooks WHERE guild_id = ?').all(req.params.guildId);
+    res.json({ webhooks: hooks });
+});
+
+// Live events via SSE
+app.get('/api/guilds/:guildId/events', requireKey, (req, res) => {
+    const guildId = req.params.guildId;
+    res.writeHead(200, {
+        Connection: 'keep-alive',
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'text/event-stream',
+        'Access-Control-Allow-Origin': '*',
+    });
+    res.write('retry: 2000\n\n');
+
+    const listener = (data) => {
+        res.write(`event: ${data.event}\n`);
+        res.write(`data: ${JSON.stringify(data.payload)}\n\n`);
+    };
+
+    eventEmitter.on(`guild:${guildId}:event`, listener);
+    const keepAlive = setInterval(() => res.write(': keepalive\n\n'), 20000);
+    req.on('close', () => {
+        clearInterval(keepAlive);
+        eventEmitter.off(`guild:${guildId}:event`, listener);
+    });
 });
 
 // Update guild config
@@ -107,13 +216,12 @@ app.patch('/api/guilds/:guildId/config', requireKey, (req, res) => {
         ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`)
         .run(guildId, JSON.stringify(cfg));
     res.json({ ok: true, config: cfg });
-    // Debug logging for PATCH
     console.log('[PATCH /api/guilds/:guildId/config] Headers:', req.headers);
     console.log('[PATCH /api/guilds/:guildId/config] Body:', req.body);
+    eventEmitter.emit(`guild:${guildId}:event`, { event: 'config.updated', payload: { guildId, config: cfg } });
+    dispatchWebhooks(guildId, 'config.updated', { guildId, config: cfg });
 });
 
-// ═══════════════════════════════════════════════════════════════
-//  MODERATION LOG ROUTES
 // ═══════════════════════════════════════════════════════════════
 
 // Add mod log entry

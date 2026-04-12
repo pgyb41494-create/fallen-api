@@ -269,13 +269,16 @@ app.post('/api/guilds/:guildId/panels/publish', requireKey, (req, res) => {
     const existing = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
     let cfg = {};
     if (existing) { try { cfg = JSON.parse(existing.config); } catch {} }
+    cfg.panels = cfg.panels || [];
+    const alreadySaved = cfg.panels.some(p => p.title === panel.title && p.description === panel.description && p.buttonText === panel.buttonText && p.buttonEmoji === panel.buttonEmoji);
+    if (!alreadySaved) cfg.panels.push(panel);
     cfg.pendingTicketPanel = { panel, channelId, createdAt: new Date().toISOString() };
     db.prepare(`INSERT INTO guild_configs (guild_id, config, updated_at) VALUES (?, ?, datetime('now'))
         ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`)
         .run(guildId, JSON.stringify(cfg));
     eventEmitter.emit(`guild:${guildId}:event`, { event: 'ticket.panel.publish', payload: { guildId, panel, channelId } });
     dispatchWebhooks(guildId, 'ticket.panel.publish', { guildId, panel, channelId });
-    res.json({ ok: true, pending: true });
+    res.json({ ok: true, pending: true, config: cfg });
 });
 
 // Register a webhook for config events

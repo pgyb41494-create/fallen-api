@@ -487,4 +487,4 @@ app.get('/health', (_, res) => res.json({ status: 'ok' }));
 // ═══════════════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════════════
-app.listen(PORT, () => console.log(`[Fallen API] Running on port ${PORT}`));
+app.listen(PORT, () => console.log(`[FS API] Running on port ${PORT}`));

@@ -1,5 +1,5 @@
 {
-  "name": "fallen-api",
+  "name": "fs-api",
   "version": "1.0.0",
   "description": "FS Bot API — Express + SQLite backend",
   "main": "server.js",

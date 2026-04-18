@@ -588,10 +588,25 @@ app.post('/api/guilds/:guildId/warns', requireKey, (req, res) => {
     res.json({ ok: true, total });
 });
 
+// Get all warnings for a guild (dashboard)
+app.get('/api/guilds/:guildId/warns', requireKey, (req, res) => {
+    const warns = db.prepare('SELECT * FROM warnings WHERE guild_id = ? ORDER BY created_at DESC').all(req.params.guildId);
+    res.json({ warns });
+});
+
 // Get warnings for a user
 app.get('/api/guilds/:guildId/warns/:userId', (req, res) => {
     const warns = db.prepare('SELECT * FROM warnings WHERE guild_id = ? AND target_id = ? ORDER BY created_at DESC').all(req.params.guildId, req.params.userId);
     res.json({ warns });
+});
+
+// Delete a single warning by id
+app.delete('/api/guilds/:guildId/warns/:userId/:warnId', requireKey, (req, res) => {
+    const { guildId, userId, warnId } = req.params;
+    const result = db.prepare('DELETE FROM warnings WHERE id = ? AND guild_id = ? AND target_id = ?').run(warnId, guildId, userId);
+    if (result.changes === 0) return res.status(404).json({ ok: false, error: 'Warn not found' });
+    const total = db.prepare('SELECT COUNT(*) as c FROM warnings WHERE guild_id = ? AND target_id = ?').get(guildId, userId).c;
+    res.json({ ok: true, total });
 });
 
 // Clear warnings for a user

@@ -14,6 +14,55 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3200;
 const API_KEY = process.env.API_KEY || '';
+// JWT secret — derive from API_KEY for Railway stability; override with JWT_SECRET env var
+const JWT_SECRET = process.env.JWT_SECRET || (process.env.API_KEY ? `jwt_${process.env.API_KEY}` : crypto.randomBytes(32).toString('hex'));
+
+// ── Minimal stateless JWT (HS256, no external deps) ───────────
+function jwtEncode(payload) {
+    const h = Buffer.from('{"alg":"HS256","typ":"JWT"}').toString('base64url');
+    const b = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const s = crypto.createHmac('sha256', JWT_SECRET).update(`${h}.${b}`).digest('base64url');
+    return `${h}.${b}.${s}`;
+}
+
+function jwtDecode(token) {
+    const parts = (token || '').split('.');
+    if (parts.length !== 3) return null;
+    const [h, b, s] = parts;
+    try {
+        const expected = crypto.createHmac('sha256', JWT_SECRET).update(`${h}.${b}`).digest('base64url');
+        if (s.length !== expected.length ||
+            !crypto.timingSafeEqual(Buffer.from(s), Buffer.from(expected))) return null;
+        return JSON.parse(Buffer.from(b, 'base64url').toString());
+    } catch { return null; }
+}
+
+async function refreshSessionTokens(session) {
+    if (!session?.refresh_token) return null;
+    try {
+        const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: DISCORD_CLIENT_ID,
+                client_secret: DISCORD_CLIENT_SECRET,
+                grant_type: 'refresh_token',
+                refresh_token: session.refresh_token,
+            }),
+        });
+        const data = await tokenRes.json();
+        if (!data.access_token) return null;
+        const newPayload = {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token || session.refresh_token,
+            expires_at: Date.now() + (data.expires_in || 604800) * 1000,
+        };
+        return { session: newPayload, newToken: jwtEncode(newPayload) };
+    } catch (err) {
+        console.error('[Auth] refreshSessionTokens failed:', err.message);
+        return null;
+    }
+}
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || process.env.BOT_TOKEN || process.env.TOKEN || '';
 const DISCORD_CLIENT_ID = process.env.CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.CLIENT_SECRET || '';
@@ -25,7 +74,7 @@ const eventEmitter = new EventEmitter();
 try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { console.warn('[FS API] Could not create DATA_DIR:', e.message); }
 
 // ── Middleware ────────────────────────────────────────────────
-app.use(cors());
+app.use(cors({ exposedHeaders: ['X-New-Token'] }));
 app.use(express.json());
 
 // Session storage helpers
@@ -77,11 +126,22 @@ async function refreshDiscordSession(sessionId, session) {
     }
 }
 
-async function getValidSession(sessionId) {
-    const session = getSession(sessionId);
+async function getValidSession(token) {
+    if (!token) return null;
+    // Try JWT-based session first (stateless — survives Railway redeploys)
+    const jwt = jwtDecode(token);
+    if (jwt?.access_token) {
+        if (jwt.expires_at && Date.now() > jwt.expires_at) {
+            // Expired — flag for refresh; caller is responsible for issuing X-New-Token
+            return jwt.refresh_token ? { ...jwt, _needsRefresh: true } : null;
+        }
+        return jwt;
+    }
+    // Legacy DB-based session fallback
+    const session = getSession(token);
     if (!session) return null;
     if (session.expires_at && Date.now() > session.expires_at) {
-        return await refreshDiscordSession(sessionId, session);
+        return await refreshDiscordSession(token, session);
     }
     return session;
 }
@@ -92,7 +152,13 @@ async function requireKey(req, res, next) {
     if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
     // Accept session token (dashboard → API calls)
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    if (token && getSession(token)) return next();
+    if (token) {
+        // JWT session (stateless, no DB needed)
+        const jwt = jwtDecode(token);
+        if (jwt?.access_token) return next();
+        // Legacy DB session
+        if (getSession(token)) return next();
+    }
     // If no API_KEY is set, allow all (dev mode)
     if (!API_KEY) return next();
     return res.status(401).json({ error: 'Unauthorized' });
@@ -642,16 +708,14 @@ app.get('/auth/callback', async (req, res) => {
         const tokenData = await tokenRes.json();
         if (!tokenData.access_token) return res.status(400).json({ error: 'Failed to get token' });
 
-        // Store token in SQLite so login survives restarts and token refresh.
-        const sessionId = crypto.randomBytes(32).toString('hex');
-        saveSession(sessionId, {
+        // Issue a signed JWT — stateless, survives Railway redeploys
+        const sessionToken = jwtEncode({
             access_token: tokenData.access_token,
             refresh_token: tokenData.refresh_token,
             expires_at: Date.now() + tokenData.expires_in * 1000,
-            created_at: new Date().toISOString(),
         });
 
-        res.redirect(`${WEBSITE_URL}/dashboard.html?token=${sessionId}`);
+        res.redirect(`${WEBSITE_URL}/dashboard.html?token=${encodeURIComponent(sessionToken)}`);
     } catch (err) {
         console.error('[Auth] callback error:', err);
         res.status(500).json({ error: 'Authentication failed' });
@@ -663,10 +727,18 @@ app.get('/auth/callback', async (req, res) => {
 // Get authenticated user
 app.get('/auth/user', async (req, res) => {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const session = await getValidSession(token);
+    let session = await getValidSession(token);
     if (!session) return res.status(401).json({ error: 'Not authenticated' });
+    // Auto-refresh expired JWT session and send new token back transparently
+    if (session._needsRefresh) {
+        const refreshed = await refreshSessionTokens(session);
+        if (!refreshed) return res.status(401).json({ error: 'Session expired, please log in again' });
+        session = refreshed.session;
+        res.setHeader('X-New-Token', refreshed.newToken);
+    }
     try {
         const r = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${session.access_token}` } });
+        if (!r.ok) return res.status(401).json({ error: 'Discord token invalid' });
         const user = await r.json();
         res.json(user);
     } catch {
@@ -677,10 +749,17 @@ app.get('/auth/user', async (req, res) => {
 // Get user's guilds
 app.get('/auth/guilds', async (req, res) => {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const session = await getValidSession(token);
+    let session = await getValidSession(token);
     if (!session) return res.status(401).json({ error: 'Not authenticated' });
+    if (session._needsRefresh) {
+        const refreshed = await refreshSessionTokens(session);
+        if (!refreshed) return res.status(401).json({ error: 'Session expired, please log in again' });
+        session = refreshed.session;
+        res.setHeader('X-New-Token', refreshed.newToken);
+    }
     try {
         const r = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${session.access_token}` } });
+        if (!r.ok) return res.status(401).json({ error: 'Discord token invalid' });
         const guilds = await r.json();
         // Filter to guilds where user has MANAGE_GUILD (0x20) or ADMINISTRATOR (0x8)
         const managed = guilds.filter(g => {

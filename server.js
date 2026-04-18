@@ -687,6 +687,103 @@ app.get('/api/stats', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+//  PROFILES + ROBLOX
+// ═══════════════════════════════════════════════════════════════
+
+// Create profiles table if not exists
+db.exec(`CREATE TABLE IF NOT EXISTS profiles (
+    discord_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    roblox_username TEXT,
+    roblox_id TEXT,
+    roblox_avatar_url TEXT,
+    region TEXT,
+    country TEXT,
+    country_flag TEXT,
+    verified INTEGER DEFAULT 0,
+    verify_code TEXT,
+    verify_expires TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+)`);
+
+// Get profile by discord ID
+app.get('/api/profiles/:userId', (req, res) => {
+    const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    res.json({ profile, player: null, rank: null, recentMatches: [] });
+});
+
+// Create profile
+app.post('/internal/profiles', requireKey, (req, res) => {
+    const { discord_id, display_name, roblox_username } = req.body;
+    if (!discord_id || !display_name) return res.status(400).json({ error: 'discord_id and display_name required' });
+    const existing = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(discord_id);
+    if (existing) return res.status(409).json({ error: 'Profile already exists', profile: existing });
+    db.prepare('INSERT INTO profiles (discord_id, display_name, roblox_username) VALUES (?, ?, ?)').run(discord_id, display_name, roblox_username || null);
+    const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(discord_id);
+    res.json({ success: true, profile });
+});
+
+// Update profile fields
+app.patch('/internal/profiles/:userId', requireKey, (req, res) => {
+    const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    const allowed = ['display_name', 'roblox_username', 'roblox_id', 'roblox_avatar_url', 'region', 'country', 'country_flag', 'verified', 'verify_code', 'verify_expires'];
+    const sets = [], vals = [];
+    for (const key of allowed) {
+        if (req.body[key] !== undefined) { sets.push(`${key}=?`); vals.push(req.body[key]); }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+    sets.push("updated_at=datetime('now')");
+    vals.push(req.params.userId);
+    db.prepare(`UPDATE profiles SET ${sets.join(',')} WHERE discord_id=?`).run(...vals);
+    const updated = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
+    res.json({ success: true, profile: updated });
+});
+
+// Delete profile
+app.delete('/internal/profiles/:userId', requireKey, (req, res) => {
+    const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    db.prepare('DELETE FROM profiles WHERE discord_id = ?').run(req.params.userId);
+    res.json({ success: true });
+});
+
+// Roblox username → user ID + avatar lookup
+app.get('/api/roblox/resolve/:username', async (req, res) => {
+    try {
+        const r1 = await fetch('https://users.roblox.com/v1/usernames/users', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ usernames: [req.params.username], excludeBannedUsers: false }),
+        });
+        const d1 = await r1.json();
+        if (!d1.data || d1.data.length === 0) return res.status(404).json({ error: 'Roblox user not found' });
+        const rUser = d1.data[0];
+        const r2 = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${rUser.id}&size=150x150&format=Png`);
+        const d2 = await r2.json();
+        const avatarUrl = d2.data?.[0]?.imageUrl || null;
+        res.json({ id: rUser.id, name: rUser.name, displayName: rUser.displayName, avatarUrl });
+    } catch {
+        res.status(500).json({ error: 'Roblox API error' });
+    }
+});
+
+// Check if Roblox bio contains verification code
+app.get('/api/roblox/verify-bio/:robloxId/:code', async (req, res) => {
+    try {
+        const r = await fetch(`https://users.roblox.com/v1/users/${encodeURIComponent(req.params.robloxId)}`);
+        if (!r.ok) return res.status(404).json({ error: 'Roblox user not found' });
+        const u = await r.json();
+        const bio = (u.description || '').trim();
+        const found = bio.includes(req.params.code);
+        res.json({ found, bio: bio.slice(0, 200) });
+    } catch {
+        res.status(500).json({ error: 'Roblox API error' });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
 //  HEALTH
 // ═══════════════════════════════════════════════════════════════
 app.get('/', (_, res) => res.json({ status: 'ok', name: 'FS Bot API', version: '1.0.0' }));

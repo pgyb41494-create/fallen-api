@@ -98,6 +98,8 @@ async function requireKey(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' });
 }
 
+const FALLEN_BOT_API = process.env.FALLEN_BOT_API || '';
+
 // ── Database Setup ───────────────────────────────────────────
 const dbPath = process.env.DATABASE_PATH || path.join(DATA_DIR, 'fallen.db');
 const db = new Database(dbPath);
@@ -157,6 +159,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS tickets (
     closed_at TEXT
 )`);
 
+// Saved embeds
+db.exec(`CREATE TABLE IF NOT EXISTS embeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+)`);
+
 // Webhook registrations for config events
  db.exec(`CREATE TABLE IF NOT EXISTS webhooks (
      id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,6 +187,203 @@ function dispatchWebhooks(guildId, event, payload) {
         }).catch(err => console.error('[Webhook] Dispatch failed', hook.url, err.message));
     }
 }
+
+// ── Embed helpers ─────────────────────────────────────────────
+function buildDiscordEmbed(embed) {
+    const colorHex = (embed.color || '#5865F2').replace('#', '');
+    const d = { color: parseInt(colorHex, 16) || 0x5865F2 };
+    if (embed.title?.trim())        d.title       = embed.title.trim();
+    if (embed.titleUrl?.trim())     d.url         = embed.titleUrl.trim();
+    if (embed.description?.trim())  d.description = embed.description.trim();
+    if (embed.footer?.trim())       d.footer      = { text: embed.footer.trim(), icon_url: embed.footerIconUrl?.trim() || undefined };
+    if (embed.thumbnail?.trim())    d.thumbnail   = { url: embed.thumbnail.trim() };
+    if (embed.image?.trim())        d.image       = { url: embed.image.trim() };
+    if (embed.author?.trim())       d.author      = { name: embed.author.trim(), icon_url: embed.authorIconUrl?.trim() || undefined, url: embed.authorUrl?.trim() || undefined };
+    if (embed.timestamp)            d.timestamp   = new Date().toISOString();
+    if (embed.fields?.length)       d.fields      = embed.fields.filter(f => f.name?.trim() && f.value?.trim()).map(f => ({ name: f.name.trim(), value: f.value.trim(), inline: !!f.inline }));
+    return d;
+}
+
+async function sendToDiscord(channelId, payload) {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || `Discord ${res.status}`);
+    }
+    return res.json();
+}
+
+// ── Embeds CRUD ───────────────────────────────────────────────
+
+// List all saved embeds for a guild
+app.get('/api/guilds/:guildId/embeds', requireKey, (req, res) => {
+    const rows = db.prepare('SELECT id, data, created_at, updated_at FROM embeds WHERE guild_id = ? ORDER BY updated_at DESC').all(req.params.guildId);
+    const embeds = rows.map(r => {
+        try { return { id: r.id, ...JSON.parse(r.data), createdAt: r.created_at, updatedAt: r.updated_at }; }
+        catch { return { id: r.id, createdAt: r.created_at, updatedAt: r.updated_at }; }
+    });
+    res.json(embeds);
+});
+
+// Create a new saved embed
+app.post('/api/guilds/:guildId/embeds', requireKey, (req, res) => {
+    const r = db.prepare(`INSERT INTO embeds (guild_id, data, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))`).run(req.params.guildId, JSON.stringify(req.body));
+    res.json({ success: true, id: r.lastInsertRowid, embed: { id: r.lastInsertRowid, ...req.body } });
+});
+
+// Update a saved embed
+app.put('/api/guilds/:guildId/embeds/:id', requireKey, async (req, res) => {
+    const row = db.prepare('SELECT data FROM embeds WHERE id = ? AND guild_id = ?').get(req.params.id, req.params.guildId);
+    if (!row) return res.status(404).json({ error: 'Embed not found' });
+    const existing = (() => { try { return JSON.parse(row.data); } catch { return {}; } })();
+    const updated = { ...existing, ...req.body };
+    db.prepare(`UPDATE embeds SET data = ?, updated_at = datetime('now') WHERE id = ? AND guild_id = ?`).run(JSON.stringify(updated), req.params.id, req.params.guildId);
+    // If already sent to Discord, patch it in-place
+    let patched = false;
+    if (updated.messageId && updated.channelId) {
+        try {
+            const discordEmbed = buildDiscordEmbed(updated);
+            await fetch(`https://discord.com/api/v10/channels/${updated.channelId}/messages/${updated.messageId}`, {
+                method: 'PATCH',
+                headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: updated.content?.trim() || '', embeds: [discordEmbed] }),
+            });
+            patched = true;
+        } catch (e) { console.warn('[Embed] Patch failed:', e.message); }
+    }
+    res.json({ success: true, embed: { id: Number(req.params.id), ...updated }, patched });
+});
+
+// Delete a saved embed
+app.delete('/api/guilds/:guildId/embeds/:id', requireKey, (req, res) => {
+    const info = db.prepare('DELETE FROM embeds WHERE id = ? AND guild_id = ?').run(req.params.id, req.params.guildId);
+    if (info.changes === 0) return res.status(404).json({ error: 'Embed not found' });
+    res.json({ success: true });
+});
+
+// Send an embed to a Discord channel
+app.post('/api/guilds/:guildId/send-embed', requireKey, async (req, res) => {
+    const { channelId, embed } = req.body;
+    if (!channelId) return res.status(400).json({ error: 'No channelId provided' });
+    if (!embed) return res.status(400).json({ error: 'No embed data provided' });
+    const discordEmbed = buildDiscordEmbed(embed);
+    if (!discordEmbed.title && !discordEmbed.description && !discordEmbed.fields?.length)
+        return res.status(400).json({ error: 'Embed must have at least a title, description, or fields.' });
+    try {
+        const msg = await sendToDiscord(channelId, { content: embed.content?.trim() || undefined, embeds: [discordEmbed] });
+        // Save / update the embed in DB with channelId + messageId
+        const guildId = req.params.guildId;
+        const embedData = { ...embed, channelId, messageId: msg.id };
+        if (embed.id) {
+            const existing = db.prepare('SELECT data FROM embeds WHERE id = ? AND guild_id = ?').get(embed.id, guildId);
+            if (existing) {
+                const prev = (() => { try { return JSON.parse(existing.data); } catch { return {}; } })();
+                db.prepare(`UPDATE embeds SET data = ?, updated_at = datetime('now') WHERE id = ? AND guild_id = ?`).run(JSON.stringify({ ...prev, ...embedData }), embed.id, guildId);
+            }
+        } else {
+            db.prepare(`INSERT INTO embeds (guild_id, data, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))`).run(guildId, JSON.stringify(embedData));
+        }
+        res.json({ success: true, messageId: msg.id, channelId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Ticket Settings ───────────────────────────────────────────
+function getTicketSettings(guildId) {
+    const row = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
+    if (!row) return {};
+    try { return JSON.parse(row.config).ticketSettings || {}; } catch { return {}; }
+}
+
+function saveTicketSettings(guildId, settings) {
+    const row = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
+    let cfg = {};
+    if (row) { try { cfg = JSON.parse(row.config); } catch {} }
+    cfg.ticketSettings = settings;
+    db.prepare(`INSERT INTO guild_configs (guild_id, config, updated_at) VALUES (?, ?, datetime('now'))
+        ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`).run(guildId, JSON.stringify(cfg));
+}
+
+app.get('/api/guilds/:guildId/tickets/settings', requireKey, (req, res) => {
+    res.json(getTicketSettings(req.params.guildId));
+});
+
+app.post('/api/guilds/:guildId/tickets/settings', requireKey, async (req, res) => {
+    const { guildId } = req.params;
+    saveTicketSettings(guildId, req.body);
+    // Push to bot if available
+    if (FALLEN_BOT_API) {
+        fetch(`${FALLEN_BOT_API}/bot/ticket-settings/${guildId}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body),
+        }).catch(() => {});
+    }
+    res.json({ success: true });
+});
+
+// Send a ticket panel to Discord
+app.post('/api/guilds/:guildId/tickets/send-panel', requireKey, async (req, res) => {
+    const { guildId } = req.params;
+    const settings = req.body;
+    saveTicketSettings(guildId, settings);
+    if (FALLEN_BOT_API) {
+        fetch(`${FALLEN_BOT_API}/bot/ticket-settings/${guildId}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(settings),
+        }).catch(() => {});
+    }
+
+    const { panelChannelId, panelEmbed = {}, buttons = [], panelType = 'buttons' } = settings;
+    if (!panelChannelId) return res.status(400).json({ error: 'No panel channel configured.' });
+    if (!panelEmbed.title?.trim() && !panelEmbed.description?.trim())
+        return res.status(400).json({ error: 'Panel embed needs at least a title or description.' });
+    if (!buttons.length) return res.status(400).json({ error: 'Add at least one button.' });
+
+    const discordEmbed = buildDiscordEmbed(panelEmbed);
+
+    // Build components
+    let components;
+    if (panelType === 'dropdown') {
+        const options = buttons.slice(0, 25).map((btn, i) => {
+            const opt = { label: (btn.label || 'Open Ticket').slice(0, 100), value: String(i) };
+            if (btn.description) opt.description = btn.description.slice(0, 100);
+            if (btn.emoji?.trim()) {
+                const custom = btn.emoji.trim().match(/^<a?:(\w+):(\d+)>$/);
+                opt.emoji = custom ? { name: custom[1], id: custom[2] } : { name: btn.emoji.trim() };
+            }
+            return opt;
+        });
+        components = [{ type: 1, components: [{ type: 3, custom_id: `tckt_sel_${guildId}`, placeholder: 'Select an option to open a ticket…', options }] }];
+    } else {
+        const styleMap = { Primary: 1, Secondary: 2, Success: 3, Danger: 4 };
+        const allBtns = buttons.slice(0, 25).map((btn, i) => {
+            const b = { type: 2, style: styleMap[btn.color] || 1, label: btn.label || 'Open Ticket', custom_id: `tckt_btn_${guildId}_${i}` };
+            if (btn.emoji?.trim()) {
+                try {
+                    const custom = btn.emoji.trim().match(/^<a?:(\w+):(\d+)>$/);
+                    b.emoji = custom ? { name: custom[1], id: custom[2] } : { name: btn.emoji.trim() };
+                } catch {}
+            }
+            return b;
+        });
+        components = [];
+        for (let i = 0; i < allBtns.length; i += 5) {
+            components.push({ type: 1, components: allBtns.slice(i, i + 5) });
+        }
+    }
+
+    try {
+        const msg = await sendToDiscord(panelChannelId, { embeds: [discordEmbed], components });
+        res.json({ success: true, messageId: msg.id, channelId: panelChannelId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // Get guild config
 app.get('/api/guilds/:guildId/config', (req, res) => {

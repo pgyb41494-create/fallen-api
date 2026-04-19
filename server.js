@@ -791,6 +791,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
     roblox_username TEXT,
     roblox_id TEXT,
     roblox_avatar_url TEXT,
+    custom_color TEXT,
+    banner_url TEXT,
     region TEXT,
     country TEXT,
     country_flag TEXT,
@@ -800,6 +802,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 )`);
+
+try { db.exec(`ALTER TABLE profiles ADD COLUMN custom_color TEXT`); } catch {}
+try { db.exec(`ALTER TABLE profiles ADD COLUMN banner_url TEXT`); } catch {}
 
 // Get profile by discord ID
 app.get('/api/profiles/:userId', (req, res) => {
@@ -823,7 +828,7 @@ app.post('/internal/profiles', requireKey, (req, res) => {
 app.patch('/internal/profiles/:userId', requireKey, (req, res) => {
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
-    const allowed = ['display_name', 'roblox_username', 'roblox_id', 'roblox_avatar_url', 'region', 'country', 'country_flag', 'verified', 'verify_code', 'verify_expires'];
+    const allowed = ['display_name', 'roblox_username', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'verified', 'verify_code', 'verify_expires'];
     const sets = [], vals = [];
     for (const key of allowed) {
         if (req.body[key] !== undefined) { sets.push(`${key}=?`); vals.push(req.body[key]); }

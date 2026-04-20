@@ -790,6 +790,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
     display_name TEXT NOT NULL,
     roblox_username TEXT,
     roblox_display_name TEXT,
+    main_character TEXT,
     roblox_id TEXT,
     roblox_avatar_url TEXT,
     custom_color TEXT,
@@ -807,6 +808,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
 try { db.exec(`ALTER TABLE profiles ADD COLUMN custom_color TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN banner_url TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN roblox_display_name TEXT`); } catch {}
+try { db.exec(`ALTER TABLE profiles ADD COLUMN main_character TEXT`); } catch {}
 
 app.get('/api/profiles/roblox/:username', (req, res) => {
     const profile = db.prepare(`
@@ -828,11 +830,11 @@ app.get('/api/profiles/:userId', (req, res) => {
 
 // Create profile
 app.post('/internal/profiles', requireKey, (req, res) => {
-    const { discord_id, display_name, roblox_username, roblox_display_name } = req.body;
+    const { discord_id, display_name, roblox_username, roblox_display_name, main_character } = req.body;
     if (!discord_id || !display_name) return res.status(400).json({ error: 'discord_id and display_name required' });
     const existing = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(discord_id);
     if (existing) return res.status(409).json({ error: 'Profile already exists', profile: existing });
-    db.prepare('INSERT INTO profiles (discord_id, display_name, roblox_username, roblox_display_name) VALUES (?, ?, ?, ?)').run(discord_id, display_name, roblox_username || null, roblox_display_name || null);
+    db.prepare('INSERT INTO profiles (discord_id, display_name, roblox_username, roblox_display_name, main_character) VALUES (?, ?, ?, ?, ?)').run(discord_id, display_name, roblox_username || null, roblox_display_name || null, main_character || null);
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(discord_id);
     res.json({ success: true, profile });
 });
@@ -841,7 +843,7 @@ app.post('/internal/profiles', requireKey, (req, res) => {
 app.patch('/internal/profiles/:userId', requireKey, (req, res) => {
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
-    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'verified', 'verify_code', 'verify_expires'];
+    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'verified', 'verify_code', 'verify_expires'];
     const sets = [], vals = [];
     for (const key of allowed) {
         if (req.body[key] !== undefined) { sets.push(`${key}=?`); vals.push(req.body[key]); }

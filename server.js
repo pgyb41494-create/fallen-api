@@ -603,6 +603,12 @@ app.patch('/api/guilds/:guildId/config', requireKey, (req, res) => {
     db.prepare(`INSERT INTO guild_configs (guild_id, config, updated_at) VALUES (?, ?, datetime('now'))
         ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`)
         .run(guildId, JSON.stringify(cfg));
+    if (FALLEN_BOT_API) {
+        fetch(`${FALLEN_BOT_API}/bot/config/${guildId}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg),
+        }).catch(() => {});
+    }
     res.json({ ok: true, config: cfg });
     console.log('[PATCH /api/guilds/:guildId/config] Headers:', req.headers);
     console.log('[PATCH /api/guilds/:guildId/config] Body:', req.body);

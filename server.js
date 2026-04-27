@@ -283,6 +283,218 @@ async function sendToDiscord(channelId, payload) {
     return res.json();
 }
 
+const LEADERBOARD_REGION_LABELS = {
+    sao_paulo: 'São Paulo, Brasil',
+    miami: 'Miami, Florida',
+    dallas: 'Dallas, Texas',
+    los_angeles: 'Los Angeles, California',
+    virginia: 'Virginia, USA',
+    chicago: 'Chicago, USA',
+    santiago: 'Santiago, Chile',
+    buenos_aires: 'Buenos Aires, Argentina',
+    lima: 'Lima, Perú',
+    bogota: 'Bogotá, Colombia',
+    mexico_city: 'Ciudad de México, México',
+    london: 'London, UK',
+    frankfurt: 'Frankfurt, Germany',
+    amsterdam: 'Amsterdam, Netherlands',
+    paris: 'Paris, France',
+    madrid: 'Madrid, Spain',
+    warsaw: 'Warsaw, Poland',
+    tokyo: 'Tokyo, Japan',
+    seoul: 'Seoul, South Korea',
+    singapore: 'Singapore',
+    sydney: 'Sydney, Australia',
+    mumbai: 'Mumbai, India',
+    dubai: 'Dubai, UAE',
+    johannesburg: 'Johannesburg, South Africa',
+};
+
+function normalizeRoleName(name) {
+    return String(name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+function rankKindFromRoleName(roleName) {
+    const name = String(roleName || '');
+    const full = name.match(/\b(phase|stage|tier)\b/i)?.[1];
+    if (full) return full.charAt(0).toUpperCase() + full.slice(1).toLowerCase();
+    const short = name.match(/\b(ph|p|st|t)\b/i)?.[1]?.toLowerCase();
+    if (short === 'st') return 'Stage';
+    if (short === 't') return 'Tier';
+    if (short === 'p' || short === 'ph') return 'Phase';
+    return null;
+}
+
+function findPhaseRoleByRoles(roles, phaseNum) {
+    const patterns = [`phase ${phaseNum}`, `phase${phaseNum}`, `stage ${phaseNum}`, `stage${phaseNum}`, `ph${phaseNum}`, `st${phaseNum}`, `tier ${phaseNum}`, `tier${phaseNum}`, `t${phaseNum}`].map(pattern => pattern.toLowerCase());
+    const exact = roles.find(role => {
+        if (role.managed) return false;
+        if (/(?:stage|phase|tier)\s*1\s*applicant/i.test(role.name)) return false;
+        return patterns.some(pattern => normalizeRoleName(role.name) === pattern);
+    });
+    if (exact) return exact;
+    return roles.find(role => {
+        if (role.managed) return false;
+        if (/(?:stage|phase|tier)\s*1\s*applicant/i.test(role.name)) return false;
+        return patterns.some(pattern => normalizeRoleName(role.name).includes(pattern));
+    }) || null;
+}
+
+function formatLeaderboardPhaseText(phaseSummary) {
+    if (!phaseSummary) return 'Sin phase';
+    if (phaseSummary.text && phaseSummary.text !== 'Sin phase') return phaseSummary.text;
+    const parts = [];
+    if (phaseSummary.rankLabel) parts.push(phaseSummary.rankLabel);
+    if (phaseSummary.tier) parts.push(phaseSummary.tier);
+    if (phaseSummary.subTier) parts.push(phaseSummary.subTier);
+    return parts.length ? parts.join(' · ') : 'Sin phase';
+}
+
+function normalizeProfileColor(input, fallback = '#2B2D31') {
+    if (!input) return fallback;
+    const clean = String(input).trim().replace(/^#/, '').replace(/^0x/i, '');
+    if (!/^[0-9a-fA-F]{6}$/.test(clean)) return fallback;
+    return `#${clean.toUpperCase()}`;
+}
+
+function getLeaderboardRegionLabel(region) {
+    if (!region) return '—';
+    return LEADERBOARD_REGION_LABELS[region] || region;
+}
+
+function buildLeaderboardCardData(profile, options = {}) {
+    const displayName = options.displayName || profile.roblox_display_name || profile.roblox_username || profile.display_name || 'Perfil';
+    const spot = Math.max(1, parseInt(options.spot, 10) || 1);
+    const rankText = options.rankText || 'Sin phase';
+    const host = options.host?.trim() || profile.roblox_username || displayName || 'Unknown';
+    const country = profile.country ? [profile.country, profile.country_flag || ''].filter(Boolean).join(' ').trim() : '—';
+    const region = getLeaderboardRegionLabel(profile.region);
+    const roblox = profile.roblox_username || '—';
+    const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
+    const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
+    const description = [
+        mention,
+        `**#${spot}. ${robloxLink}**`,
+        `┌ Rank: ${rankText}`,
+        `├ Host: ${host}`,
+        `├ País: ${country}`,
+        `└ Región: ${region}`,
+    ].filter(Boolean).join('\n');
+
+    return {
+        profile,
+        spot,
+        rankText,
+        displayName,
+        host,
+        country,
+        region,
+        mention,
+        roblox,
+        description,
+        embed: {
+            color: normalizeProfileColor(profile.custom_color),
+            description,
+            footer: profile.display_name ? `FS · ${profile.display_name}` : 'FS Bot',
+            thumbnail: profile.roblox_avatar_url || '',
+        },
+    };
+}
+
+async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {}) {
+    const rows = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
+    const profiles = rows.filter(profile => profile.leaderboard_position !== null && profile.leaderboard_position !== undefined);
+    if (!profiles.length) return [];
+
+    let roleById = new Map();
+    let phaseMap = {};
+
+    if (resolveRanks) {
+        if (!DISCORD_BOT_TOKEN) throw new Error('Discord bot token not configured (set BOT_TOKEN or DISCORD_BOT_TOKEN)');
+        const cfgRow = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
+        if (cfgRow?.config) {
+            try {
+                const cfg = JSON.parse(cfgRow.config);
+                phaseMap = cfg.verifyPhaseRoleMap || {};
+            } catch {
+                phaseMap = {};
+            }
+        }
+
+        const rolesRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } });
+        if (!rolesRes.ok) throw new Error('Failed to fetch roles');
+        const roles = await rolesRes.json();
+        roleById = new Map(roles.map(role => [role.id, role]));
+    }
+
+    const cards = [];
+    for (const [index, profile] of profiles.entries()) {
+        let rankText = 'Sin phase';
+        if (resolveRanks && profile.discord_id) {
+            try {
+                const memberRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${profile.discord_id}`, {
+                    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+                });
+                if (memberRes.ok) {
+                    const member = await memberRes.json();
+                    const memberRoleIds = Array.isArray(member.roles) ? member.roles : [];
+                    const memberRoles = memberRoleIds.map(id => roleById.get(id)).filter(Boolean);
+
+                    let phaseNum = null;
+                    let rankKind = null;
+                    for (let i = 0; i <= 5; i++) {
+                        const mappedRoleId = phaseMap[String(i)];
+                        if (mappedRoleId && memberRoleIds.includes(mappedRoleId)) {
+                            phaseNum = i;
+                            rankKind = rankKindFromRoleName(roleById.get(mappedRoleId)?.name);
+                            break;
+                        }
+                    }
+
+                    if (phaseNum === null) {
+                        const phaseRole = findPhaseRoleByRoles(memberRoles, 0) || findPhaseRoleByRoles(memberRoles, 1) || findPhaseRoleByRoles(memberRoles, 2) || findPhaseRoleByRoles(memberRoles, 3) || findPhaseRoleByRoles(memberRoles, 4) || findPhaseRoleByRoles(memberRoles, 5);
+                        if (phaseRole) {
+                            const match = phaseRole.name.match(/(?:phase|stage|tier)\s*(\d)/i) || phaseRole.name.match(/\b(ph|p|st|t)\s*(\d)/i) || phaseRole.name.match(/(\d)/);
+                            if (match) {
+                                phaseNum = Number(match[match.length > 2 ? 2 : 1]);
+                                rankKind = rankKindFromRoleName(phaseRole.name);
+                            }
+                        }
+                    }
+
+                    if (phaseNum === null) {
+                        const roleMatch = memberRoles.find(role => !role.managed && /(?:phase|stage|tier)\s*[0-5]/i.test(role.name) && !/(?:stage|phase|tier)\s*1\s*applicant/i.test(role.name));
+                        if (roleMatch) {
+                            const match = roleMatch.name.match(/(?:phase|stage|tier)\s*(\d)/i) || roleMatch.name.match(/\b(ph|p|st|t)\s*(\d)/i) || roleMatch.name.match(/(\d)/);
+                            if (match) {
+                                phaseNum = Number(match[match.length > 2 ? 2 : 1]);
+                                rankKind = rankKindFromRoleName(roleMatch.name);
+                            }
+                        }
+                    }
+
+                    const tierRole = memberRoles.find(role => !role.managed && /\b(high|mid|low)\b/i.test(role.name));
+                    const subTierRole = memberRoles.find(role => !role.managed && /\b(strong|stable|weak)\b/i.test(role.name));
+                    const phaseText = phaseNum !== null ? `${rankKind || 'Phase'} ${phaseNum}` : null;
+                    const tierText = tierRole ? (tierRole.name.match(/\b(high|mid|low)\b/i)?.[1].toUpperCase() || tierRole.name.toUpperCase()) : null;
+                    const subTierText = subTierRole ? (subTierRole.name.match(/\b(strong|stable|weak)\b/i)?.[1].toUpperCase() || subTierRole.name.toUpperCase()) : null;
+                    const parts = [phaseText, tierText, subTierText].filter(Boolean);
+                    rankText = parts.length ? parts.join(' · ') : 'Sin phase';
+                }
+            } catch {
+                rankText = 'Sin phase';
+            }
+        }
+
+        cards.push(buildLeaderboardCardData(profile, {
+            spot: profile.leaderboard_position || index + 1,
+            rankText,
+        }));
+    }
+
+    return cards;
+}
+
 // ── Embeds CRUD ───────────────────────────────────────────────
 
 // List all saved embeds for a guild
@@ -354,6 +566,26 @@ app.post('/api/guilds/:guildId/send-embed', requireKey, async (req, res) => {
             db.prepare(`INSERT INTO embeds (guild_id, data, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))`).run(guildId, JSON.stringify(embedData));
         }
         res.json({ success: true, messageId: msg.id, channelId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/guilds/:guildId/leaderboard/send', requireKey, async (req, res) => {
+    const { channelId } = req.body;
+    if (!channelId) return res.status(400).json({ error: 'No channelId provided' });
+    try {
+        const cards = await getLeaderboardCardsForGuild(req.params.guildId, { resolveRanks: true });
+        if (!cards.length) return res.status(400).json({ error: 'No registered leaderboard profiles found.' });
+
+        let messagesSent = 0;
+        for (let i = 0; i < cards.length; i += 10) {
+            const embeds = cards.slice(i, i + 10).map(card => buildDiscordEmbed(card.embed));
+            await sendToDiscord(channelId, { embeds });
+            messagesSent += 1;
+        }
+
+        res.json({ success: true, channelId, profiles: cards.length, messages: messagesSent });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -823,6 +1055,32 @@ try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_position INTEGER`); }
 app.get('/api/profiles', requireKey, (req, res) => {
     const profiles = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
     res.json({ profiles });
+});
+
+app.get('/api/guilds/:guildId/leaderboard', requireKey, async (req, res) => {
+    try {
+        const resolveRanks = !!DISCORD_BOT_TOKEN;
+        const cards = await getLeaderboardCardsForGuild(req.params.guildId, { resolveRanks });
+        res.json({
+            guildId: req.params.guildId,
+            count: cards.length,
+            cards,
+            rankResolutionAvailable: resolveRanks,
+        });
+    } catch (err) {
+        try {
+            const cards = await getLeaderboardCardsForGuild(req.params.guildId, { resolveRanks: false });
+            res.json({
+                guildId: req.params.guildId,
+                count: cards.length,
+                cards,
+                rankResolutionAvailable: false,
+                warning: err.message,
+            });
+        } catch (fallbackErr) {
+            res.status(500).json({ error: fallbackErr.message });
+        }
+    }
 });
 
 app.get('/api/profiles/roblox/:username', (req, res) => {

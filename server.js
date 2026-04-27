@@ -819,6 +819,12 @@ try { db.exec(`ALTER TABLE profiles ADD COLUMN roblox_display_name TEXT`); } cat
 try { db.exec(`ALTER TABLE profiles ADD COLUMN main_character TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_position INTEGER`); } catch {}
 
+// Get all profiles
+app.get('/api/profiles', requireKey, (req, res) => {
+    const profiles = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
+    res.json({ profiles });
+});
+
 app.get('/api/profiles/roblox/:username', (req, res) => {
     const profile = db.prepare(`
         SELECT * FROM profiles

@@ -67,7 +67,10 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || process.env.BOT_TOKEN
 const DISCORD_CLIENT_ID = process.env.CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.CLIENT_SECRET || '';
 const REDIRECT_URI = process.env.REDIRECT_URI || '';
-const WEBSITE_URL = process.env.WEBSITE_URL || 'http://localhost:5173';
+const configuredWebsiteUrl = (process.env.WEBSITE_URL || '').trim().replace(/\/$/, '');
+const WEBSITE_URL = configuredWebsiteUrl && !/clansky\.vercel\.app/i.test(configuredWebsiteUrl)
+    ? configuredWebsiteUrl
+    : (process.env.NODE_ENV === 'development' ? 'http://localhost:5173' : 'https://fsbot-website.vercel.app');
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const eventEmitter = new EventEmitter();
 
@@ -782,19 +785,78 @@ app.get('/api/guilds/:guildId/discord', requireKey, async (req, res) => {
     if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Discord bot token not configured (set BOT_TOKEN or DISCORD_BOT_TOKEN)' });
     const guildId = req.params.guildId;
     try {
-        const [rolesRes, channelsRes] = await Promise.all([
+        const [rolesRes, channelsRes, botMemberRes] = await Promise.all([
             fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
             fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
+            fetch(`https://discord.com/api/v10/guilds/${guildId}/members/@me`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
         ]);
         if (!rolesRes.ok) return res.status(rolesRes.status).json({ error: 'Failed to fetch roles' });
         if (!channelsRes.ok) return res.status(channelsRes.status).json({ error: 'Failed to fetch channels' });
         const roles = await rolesRes.json();
         const channels = await channelsRes.json();
         const categories = channels.filter(c => c.type === 4);
-        res.json({ roles, channels, categories });
+        let manageableRoles = [];
+        if (botMemberRes?.ok) {
+            const botMember = await botMemberRes.json();
+            const botRoleIds = new Set(botMember.roles || []);
+            const botTopPosition = roles.reduce((highest, role) => (
+                botRoleIds.has(role.id) ? Math.max(highest, Number(role.position || 0)) : highest
+            ), 0);
+            manageableRoles = roles.filter(role => role.id !== guildId && !role.managed && Number(role.position || 0) < botTopPosition);
+        }
+        res.json({ roles, manageableRoles, channels, categories });
     } catch (err) {
         console.error('[Discord] fetch guild data failed:', err);
         res.status(500).json({ error: 'Failed to fetch guild data' });
+    }
+});
+
+app.get('/api/guilds/:guildId/members/:userId', requireKey, async (req, res) => {
+    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Discord bot token not configured (set BOT_TOKEN or DISCORD_BOT_TOKEN)' });
+    try {
+        const r = await fetch(`https://discord.com/api/v10/guilds/${req.params.guildId}/members/${req.params.userId}`, {
+            headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+        });
+        if (!r.ok) return res.status(r.status).json({ error: 'Failed to fetch member' });
+        const member = await r.json();
+        res.json({ member, roles: member.roles || [] });
+    } catch (err) {
+        console.error('[Discord] fetch member failed:', err);
+        res.status(500).json({ error: 'Failed to fetch member' });
+    }
+});
+
+app.patch('/api/guilds/:guildId/members/:userId', requireKey, async (req, res) => {
+    if (!DISCORD_BOT_TOKEN) return res.status(500).json({ error: 'Discord bot token not configured (set BOT_TOKEN or DISCORD_BOT_TOKEN)' });
+    try {
+        const roleIds = Array.isArray(req.body.roles) ? [...new Set(req.body.roles.map(roleId => String(roleId).trim()).filter(Boolean))] : null;
+        if (!roleIds) return res.status(400).json({ error: 'roles array required' });
+
+        const rolesRes = await fetch(`https://discord.com/api/v10/guilds/${req.params.guildId}/roles`, {
+            headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+        });
+        if (!rolesRes.ok) return res.status(rolesRes.status).json({ error: 'Failed to fetch guild roles' });
+        const guildRoles = await rolesRes.json();
+        const validRoleIds = new Set(guildRoles.map(role => role.id).filter(roleId => roleId && roleId !== req.params.guildId));
+        const safeRoles = roleIds.filter(roleId => validRoleIds.has(roleId));
+
+        const patchRes = await fetch(`https://discord.com/api/v10/guilds/${req.params.guildId}/members/${req.params.userId}`, {
+            method: 'PATCH',
+            headers: {
+                Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ roles: safeRoles }),
+        });
+        if (!patchRes.ok) {
+            const errorText = await patchRes.text().catch(() => 'Failed to update member roles');
+            return res.status(patchRes.status).json({ error: errorText || 'Failed to update member roles' });
+        }
+        const member = await patchRes.json();
+        res.json({ success: true, member, roles: member.roles || safeRoles });
+    } catch (err) {
+        console.error('[Discord] update member roles failed:', err);
+        res.status(500).json({ error: 'Failed to update member roles' });
     }
 });
 
@@ -1085,6 +1147,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
     leaderboard_position INTEGER,
     leaderboard_top_image_url TEXT,
     leaderboard_bottom_image_url TEXT,
+    profile_score TEXT,
     verified INTEGER DEFAULT 0,
     verify_code TEXT,
     verify_expires TEXT,
@@ -1099,6 +1162,7 @@ try { db.exec(`ALTER TABLE profiles ADD COLUMN main_character TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_position INTEGER`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_top_image_url TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_bottom_image_url TEXT`); } catch {}
+try { db.exec(`ALTER TABLE profiles ADD COLUMN profile_score TEXT`); } catch {}
 
 // Get all profiles
 app.get('/api/profiles', requireKey, (req, res) => {
@@ -1152,11 +1216,11 @@ app.get('/api/profiles/:userId', (req, res) => {
 
 // Create profile
 app.post('/internal/profiles', requireKey, (req, res) => {
-    const { discord_id, display_name, roblox_username, roblox_display_name, main_character } = req.body;
+    const { discord_id, display_name, roblox_username, roblox_display_name, main_character, profile_score } = req.body;
     if (!discord_id || !display_name) return res.status(400).json({ error: 'discord_id and display_name required' });
     const existing = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(discord_id);
     if (existing) return res.status(409).json({ error: 'Profile already exists', profile: existing });
-    db.prepare('INSERT INTO profiles (discord_id, display_name, roblox_username, roblox_display_name, main_character) VALUES (?, ?, ?, ?, ?)').run(discord_id, display_name, roblox_username || null, roblox_display_name || null, main_character || null);
+    db.prepare('INSERT INTO profiles (discord_id, display_name, roblox_username, roblox_display_name, main_character, profile_score) VALUES (?, ?, ?, ?, ?, ?)').run(discord_id, display_name, roblox_username || null, roblox_display_name || null, main_character || null, profile_score || null);
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(discord_id);
     res.json({ success: true, profile });
 });
@@ -1165,7 +1229,7 @@ app.post('/internal/profiles', requireKey, (req, res) => {
 app.patch('/internal/profiles/:userId', requireKey, (req, res) => {
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
-    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'leaderboard_position', 'leaderboard_top_image_url', 'leaderboard_bottom_image_url', 'verified', 'verify_code', 'verify_expires'];
+    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'leaderboard_position', 'leaderboard_top_image_url', 'leaderboard_bottom_image_url', 'profile_score', 'verified', 'verify_code', 'verify_expires'];
     const sets = [], vals = [];
     for (const key of allowed) {
         if (req.body[key] !== undefined) { sets.push(`${key}=?`); vals.push(req.body[key]); }

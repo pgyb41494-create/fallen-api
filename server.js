@@ -654,8 +654,9 @@ app.get('/api/guilds/:guildId/modlogs', (req, res) => {
 app.post('/api/guilds/:guildId/warns', requireKey, (req, res) => {
     const { guildId } = req.params;
     const { target_id, target_name, moderator_id, moderator_name, reason } = req.body;
+    const safeReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Sin motivo';
     db.prepare('INSERT INTO warnings (guild_id, target_id, target_name, moderator_id, moderator_name, reason) VALUES (?,?,?,?,?,?)')
-        .run(guildId, target_id, target_name || null, moderator_id, moderator_name || null, reason);
+        .run(guildId, target_id, target_name || null, moderator_id, moderator_name || null, safeReason);
     const total = db.prepare('SELECT COUNT(*) as c FROM warnings WHERE guild_id = ? AND target_id = ?').get(guildId, target_id).c;
     res.json({ ok: true, total });
 });
@@ -804,6 +805,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
     region TEXT,
     country TEXT,
     country_flag TEXT,
+    leaderboard_position INTEGER,
     verified INTEGER DEFAULT 0,
     verify_code TEXT,
     verify_expires TEXT,
@@ -815,6 +817,7 @@ try { db.exec(`ALTER TABLE profiles ADD COLUMN custom_color TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN banner_url TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN roblox_display_name TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN main_character TEXT`); } catch {}
+try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_position INTEGER`); } catch {}
 
 app.get('/api/profiles/roblox/:username', (req, res) => {
     const profile = db.prepare(`
@@ -849,7 +852,7 @@ app.post('/internal/profiles', requireKey, (req, res) => {
 app.patch('/internal/profiles/:userId', requireKey, (req, res) => {
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
-    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'verified', 'verify_code', 'verify_expires'];
+    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'leaderboard_position', 'verified', 'verify_code', 'verify_expires'];
     const sets = [], vals = [];
     for (const key of allowed) {
         if (req.body[key] !== undefined) { sets.push(`${key}=?`); vals.push(req.body[key]); }

@@ -383,9 +383,9 @@ function buildLeaderboardCardData(profile, options = {}) {
     const roblox = profile.roblox_username || '—';
     const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
-    const color = normalizeProfileColor(profile.custom_color);
-    const topImageUrl = normalizeMediaUrl(profile.leaderboard_top_image_url);
-    const bottomImageUrl = normalizeMediaUrl(profile.leaderboard_bottom_image_url);
+    const color = normalizeProfileColor(options.globalColor || profile.custom_color);
+    const topImageUrl = normalizeMediaUrl(options.globalTopImageUrl || profile.leaderboard_top_image_url);
+    const bottomImageUrl = normalizeMediaUrl(options.globalBottomImageUrl || profile.leaderboard_bottom_image_url);
     const description = [
         mention,
         `**#${spot}. ${robloxLink}**`,
@@ -435,19 +435,22 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
 
     let roleById = new Map();
     let phaseMap = {};
+    let leaderboardSettings = {};
+
+    const cfgRow = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
+    if (cfgRow?.config) {
+        try {
+            const cfg = JSON.parse(cfgRow.config);
+            phaseMap = cfg.verifyPhaseRoleMap || {};
+            leaderboardSettings = cfg.leaderboardSettings || {};
+        } catch {
+            phaseMap = {};
+            leaderboardSettings = {};
+        }
+    }
 
     if (resolveRanks) {
         if (!DISCORD_BOT_TOKEN) throw new Error('Discord bot token not configured (set BOT_TOKEN or DISCORD_BOT_TOKEN)');
-        const cfgRow = db.prepare('SELECT config FROM guild_configs WHERE guild_id = ?').get(guildId);
-        if (cfgRow?.config) {
-            try {
-                const cfg = JSON.parse(cfgRow.config);
-                phaseMap = cfg.verifyPhaseRoleMap || {};
-            } catch {
-                phaseMap = {};
-            }
-        }
-
         const rolesRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } });
         if (!rolesRes.ok) throw new Error('Failed to fetch roles');
         const roles = await rolesRes.json();
@@ -516,6 +519,9 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
         cards.push(buildLeaderboardCardData(profile, {
             spot: profile.leaderboard_position || index + 1,
             rankText,
+            globalColor: leaderboardSettings.color || leaderboardSettings.embedColor || leaderboardSettings.leaderboardColor || '',
+            globalTopImageUrl: leaderboardSettings.topImageUrl || leaderboardSettings.topImage || leaderboardSettings.top || '',
+            globalBottomImageUrl: leaderboardSettings.bottomImageUrl || leaderboardSettings.bottomImage || leaderboardSettings.bottom || '',
         }));
     }
 

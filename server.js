@@ -357,6 +357,17 @@ function normalizeProfileColor(input, fallback = '#2B2D31') {
     return `#${clean.toUpperCase()}`;
 }
 
+function normalizeMediaUrl(input) {
+    if (!input) return '';
+    try {
+        const parsed = new URL(String(input).trim());
+        if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+}
+
 function getLeaderboardRegionLabel(region) {
     if (!region) return '—';
     return LEADERBOARD_REGION_LABELS[region] || region;
@@ -372,6 +383,9 @@ function buildLeaderboardCardData(profile, options = {}) {
     const roblox = profile.roblox_username || '—';
     const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
+    const color = normalizeProfileColor(profile.custom_color);
+    const topImageUrl = normalizeMediaUrl(profile.leaderboard_top_image_url);
+    const bottomImageUrl = normalizeMediaUrl(profile.leaderboard_bottom_image_url);
     const description = [
         mention,
         `**#${spot}. ${robloxLink}**`,
@@ -391,13 +405,26 @@ function buildLeaderboardCardData(profile, options = {}) {
         region,
         mention,
         roblox,
+        color,
+        topImageUrl,
+        bottomImageUrl,
         description,
         embed: {
-            color: normalizeProfileColor(profile.custom_color),
+            color,
             description,
             footer: profile.display_name ? `FS · ${profile.display_name}` : 'FS Bot',
             thumbnail: profile.roblox_avatar_url || '',
         },
+        messageEmbeds: [
+            ...(topImageUrl ? [{ color, image: topImageUrl }] : []),
+            {
+                color,
+                description,
+                footer: profile.display_name ? `FS · ${profile.display_name}` : 'FS Bot',
+                thumbnail: profile.roblox_avatar_url || '',
+            },
+            ...(bottomImageUrl ? [{ color, image: bottomImageUrl }] : []),
+        ],
     };
 }
 
@@ -579,9 +606,21 @@ app.post('/api/guilds/:guildId/leaderboard/send', requireKey, async (req, res) =
         if (!cards.length) return res.status(400).json({ error: 'No registered leaderboard profiles found.' });
 
         let messagesSent = 0;
-        for (let i = 0; i < cards.length; i += 10) {
-            const embeds = cards.slice(i, i + 10).map(card => buildDiscordEmbed(card.embed));
-            await sendToDiscord(channelId, { embeds });
+        let queuedEmbeds = [];
+        for (const card of cards) {
+            const messageEmbeds = (card.messageEmbeds?.length ? card.messageEmbeds : [card.embed]).map(buildDiscordEmbed);
+            if (messageEmbeds.length > 10) {
+                return res.status(400).json({ error: 'One leaderboard card exceeds Discord embed limits.' });
+            }
+            if (queuedEmbeds.length && queuedEmbeds.length + messageEmbeds.length > 10) {
+                await sendToDiscord(channelId, { embeds: queuedEmbeds });
+                messagesSent += 1;
+                queuedEmbeds = [];
+            }
+            queuedEmbeds.push(...messageEmbeds);
+        }
+        if (queuedEmbeds.length) {
+            await sendToDiscord(channelId, { embeds: queuedEmbeds });
             messagesSent += 1;
         }
 
@@ -1038,6 +1077,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS profiles (
     country TEXT,
     country_flag TEXT,
     leaderboard_position INTEGER,
+    leaderboard_top_image_url TEXT,
+    leaderboard_bottom_image_url TEXT,
     verified INTEGER DEFAULT 0,
     verify_code TEXT,
     verify_expires TEXT,
@@ -1050,6 +1091,8 @@ try { db.exec(`ALTER TABLE profiles ADD COLUMN banner_url TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN roblox_display_name TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN main_character TEXT`); } catch {}
 try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_position INTEGER`); } catch {}
+try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_top_image_url TEXT`); } catch {}
+try { db.exec(`ALTER TABLE profiles ADD COLUMN leaderboard_bottom_image_url TEXT`); } catch {}
 
 // Get all profiles
 app.get('/api/profiles', requireKey, (req, res) => {
@@ -1116,7 +1159,7 @@ app.post('/internal/profiles', requireKey, (req, res) => {
 app.patch('/internal/profiles/:userId', requireKey, (req, res) => {
     const profile = db.prepare('SELECT * FROM profiles WHERE discord_id = ?').get(req.params.userId);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
-    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'leaderboard_position', 'verified', 'verify_code', 'verify_expires'];
+    const allowed = ['display_name', 'roblox_username', 'roblox_display_name', 'main_character', 'roblox_id', 'roblox_avatar_url', 'custom_color', 'banner_url', 'region', 'country', 'country_flag', 'leaderboard_position', 'leaderboard_top_image_url', 'leaderboard_bottom_image_url', 'verified', 'verify_code', 'verify_expires'];
     const sets = [], vals = [];
     for (const key of allowed) {
         if (req.body[key] !== undefined) { sets.push(`${key}=?`); vals.push(req.body[key]); }

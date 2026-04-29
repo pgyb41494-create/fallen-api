@@ -476,9 +476,8 @@ function buildLeaderboardCardData(profile, options = {}) {
     const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
     const color = normalizeProfileColor(options.globalColor || profile.custom_color);
-    const introGifUrl = normalizeMediaUrl(options.globalIntroGifUrl || '');
+    const introGifUrl = options.showIntroGif ? normalizeMediaUrl(options.globalIntroGifUrl || '') : '';
     const topImageUrl = normalizeMediaUrl(options.showTopImage ? (options.globalTopImageUrl || profile.leaderboard_top_image_url) : '');
-    const bottomImageUrl = normalizeMediaUrl(options.globalBottomImageUrl || profile.leaderboard_bottom_image_url);
     const description = renderLeaderboardTemplate(options.descriptionTemplate, buildLeaderboardTemplateVariables(profile, {
         displayName,
         spot,
@@ -501,7 +500,6 @@ function buildLeaderboardCardData(profile, options = {}) {
         color,
         introGifUrl,
         topImageUrl,
-        bottomImageUrl,
         description,
         embed: {
             color,
@@ -518,7 +516,6 @@ function buildLeaderboardCardData(profile, options = {}) {
                 thumbnail: profile.roblox_avatar_url || '',
             },
             ...(introGifUrl ? [{ color, image: introGifUrl }] : []),
-            ...(bottomImageUrl ? [{ color, image: bottomImageUrl }] : []),
         ],
     };
 }
@@ -652,11 +649,11 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
 
         occupiedBySpot.set(spot, buildLeaderboardCardData(profile, {
             showTopImage: occupiedIndex === 0,
+            showIntroGif: occupiedIndex > 0,
             spot,
             rankText,
             globalColor: leaderboardSettings.color || leaderboardSettings.embedColor || leaderboardSettings.leaderboardColor || '',
             globalTopImageUrl: leaderboardSettings.topImageUrl || leaderboardSettings.topImage || leaderboardSettings.top || '',
-            globalBottomImageUrl: leaderboardSettings.bottomImageUrl || leaderboardSettings.bottomImage || leaderboardSettings.bottom || '',
             globalIntroGifUrl: leaderboardSettings.introGifUrl || leaderboardSettings.startGifUrl || leaderboardSettings.startGif || '',
             descriptionTemplate: leaderboardSettings.descriptionTemplate || leaderboardSettings.cardTemplate || leaderboardSettings.description || DEFAULT_LEADERBOARD_DESCRIPTION_TEMPLATE,
         }));

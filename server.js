@@ -174,6 +174,8 @@ const dbPath = process.env.DATABASE_PATH || path.join(DATA_DIR, 'fallen.db');
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+const guildLeaderboardMemberCache = new Map();
+const GUILD_LEADERBOARD_MEMBER_CACHE_TTL = 5 * 60 * 1000;
 
 // Guild configs
 db.exec(`CREATE TABLE IF NOT EXISTS guild_configs (
@@ -371,6 +373,61 @@ function normalizeMediaUrl(input) {
     }
 }
 
+const DEFAULT_LEADERBOARD_DESCRIPTION_TEMPLATE = [
+    '{{mention}}',
+    '**#{{spot}}. {{roblox_link}}**',
+    '┌ Rank: {{rank}}',
+    '├ Host: {{host}}',
+    '├ País: {{country}}',
+    '└ Región: {{region}}',
+].join('\n');
+
+function renderLeaderboardTemplate(template, variables = {}) {
+    const source = String(template || '').trim() || DEFAULT_LEADERBOARD_DESCRIPTION_TEMPLATE;
+    return source.replace(/{{\s*([a-z0-9_]+)\s*}}/gi, (_, key) => {
+        const value = variables[key] ?? variables[key.toLowerCase()] ?? '';
+        return value === null || value === undefined ? '' : String(value);
+    });
+}
+
+function buildLeaderboardTemplateVariables(profile, options = {}) {
+    const displayName = options.displayName || profile.roblox_display_name || profile.roblox_username || profile.display_name || 'Perfil';
+    const spot = Math.max(1, parseInt(options.spot, 10) || 1);
+    const rankText = options.rankText || 'Sin phase';
+    const host = options.host?.trim() || profile.roblox_username || displayName || 'Unknown';
+    const country = profile.country ? [profile.country, profile.country_flag || ''].filter(Boolean).join(' ').trim() : '—';
+    const region = getLeaderboardRegionLabel(profile.region);
+    const roblox = profile.roblox_username || '—';
+    const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
+    const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
+    return {
+        mention,
+        spot: String(spot),
+        spot_label: `#${spot}.`,
+        spot_hash: `#${spot}`,
+        rank: rankText,
+        host,
+        country,
+        region,
+        roblox,
+        roblox_link: robloxLink,
+        display_name: displayName,
+        score: String(options.profileScore ?? profile.profile_score ?? '—'),
+        vacant: '',
+        guild_name: options.guildName || '',
+    };
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 4000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function getManageableRolesForGuild(guildId, roles, botUserId = null) {
     if (!DISCORD_BOT_TOKEN) return [];
     try {
@@ -419,17 +476,17 @@ function buildLeaderboardCardData(profile, options = {}) {
     const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
     const color = normalizeProfileColor(options.globalColor || profile.custom_color);
-    const introGifUrl = normalizeMediaUrl(options.globalIntroGifUrl && Number(options.sequenceIndex || 0) > 0 ? options.globalIntroGifUrl : '');
-    const topImageUrl = normalizeMediaUrl(options.globalTopImageUrl || profile.leaderboard_top_image_url);
+    const introGifUrl = normalizeMediaUrl(options.globalIntroGifUrl || '');
+    const topImageUrl = normalizeMediaUrl(options.showTopImage ? (options.globalTopImageUrl || profile.leaderboard_top_image_url) : '');
     const bottomImageUrl = normalizeMediaUrl(options.globalBottomImageUrl || profile.leaderboard_bottom_image_url);
-    const description = [
-        mention,
-        `**#${spot}. ${robloxLink}**`,
-        `┌ Rank: ${rankText}`,
-        `├ Host: ${host}`,
-        `├ País: ${country}`,
-        `└ Región: ${region}`,
-    ].filter(Boolean).join('\n');
+    const description = renderLeaderboardTemplate(options.descriptionTemplate, buildLeaderboardTemplateVariables(profile, {
+        displayName,
+        spot,
+        rankText,
+        host,
+        profileScore: options.profileScore,
+        guildName: options.guildName,
+    })).replace(/\n{3,}/g, '\n\n').trim();
 
     return {
         profile,
@@ -453,7 +510,6 @@ function buildLeaderboardCardData(profile, options = {}) {
             thumbnail: profile.roblox_avatar_url || '',
         },
         messageEmbeds: [
-            ...(introGifUrl ? [{ color, image: introGifUrl }] : []),
             ...(topImageUrl ? [{ color, image: topImageUrl }] : []),
             {
                 color,
@@ -461,8 +517,45 @@ function buildLeaderboardCardData(profile, options = {}) {
                 footer: profile.display_name ? `FS · ${profile.display_name}` : 'FS Bot',
                 thumbnail: profile.roblox_avatar_url || '',
             },
+            ...(introGifUrl ? [{ color, image: introGifUrl }] : []),
             ...(bottomImageUrl ? [{ color, image: bottomImageUrl }] : []),
         ],
+    };
+}
+
+function buildLeaderboardVacantCardData(spot, options = {}) {
+    const color = normalizeProfileColor(options.globalColor || '#6B7280');
+    const description = `**#${spot}. Vacant**\nNo profile assigned to this spot.`;
+    return {
+        isVacant: true,
+        spot,
+        rankText: 'Vacant',
+        displayName: 'Vacant',
+        host: 'Vacant',
+        country: '—',
+        region: '—',
+        mention: '',
+        roblox: '—',
+        color,
+        description,
+        profile: {
+            discord_id: '',
+            display_name: 'Vacant',
+            profile_score: '',
+            roblox_username: '',
+            roblox_display_name: '',
+            roblox_avatar_url: '',
+        },
+        embed: {
+            color,
+            description,
+            footer: 'FS Bot',
+        },
+        messageEmbeds: [{
+            color,
+            description,
+            footer: 'FS Bot',
+        }],
     };
 }
 
@@ -495,8 +588,11 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
         roleById = new Map(roles.map(role => [role.id, role]));
     }
 
-    const cards = [];
-    for (const [index, profile] of profiles.entries()) {
+    const occupiedBySpot = new Map();
+    let occupiedIndex = 0;
+    for (const profile of profiles) {
+        const spot = parseInt(profile.leaderboard_position, 10);
+        if (!Number.isInteger(spot) || spot < 1 || spot > 10 || occupiedBySpot.has(spot)) continue;
         let rankText = 'Sin phase';
         if (resolveRanks && profile.discord_id) {
             try {
@@ -554,15 +650,29 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
             }
         }
 
-        cards.push(buildLeaderboardCardData(profile, {
-            sequenceIndex: index,
-            spot: profile.leaderboard_position || index + 1,
+        occupiedBySpot.set(spot, buildLeaderboardCardData(profile, {
+            showTopImage: occupiedIndex === 0,
+            spot,
             rankText,
             globalColor: leaderboardSettings.color || leaderboardSettings.embedColor || leaderboardSettings.leaderboardColor || '',
             globalTopImageUrl: leaderboardSettings.topImageUrl || leaderboardSettings.topImage || leaderboardSettings.top || '',
             globalBottomImageUrl: leaderboardSettings.bottomImageUrl || leaderboardSettings.bottomImage || leaderboardSettings.bottom || '',
             globalIntroGifUrl: leaderboardSettings.introGifUrl || leaderboardSettings.startGifUrl || leaderboardSettings.startGif || '',
+            descriptionTemplate: leaderboardSettings.descriptionTemplate || leaderboardSettings.cardTemplate || leaderboardSettings.description || DEFAULT_LEADERBOARD_DESCRIPTION_TEMPLATE,
         }));
+        occupiedIndex += 1;
+    }
+
+    const cards = [];
+    for (let spot = 1; spot <= 10; spot += 1) {
+        const occupied = occupiedBySpot.get(spot);
+        if (occupied) {
+            cards.push(occupied);
+        } else {
+            cards.push(buildLeaderboardVacantCardData(spot, {
+                globalColor: leaderboardSettings.color || leaderboardSettings.embedColor || leaderboardSettings.leaderboardColor || '',
+            }));
+        }
     }
 
     return cards;
@@ -1237,10 +1347,19 @@ app.get('/api/guilds/:guildId/leaderboard/profiles', requireKey, async (req, res
     try {
         let memberRows = [];
         if (FALLEN_BOT_API) {
-            const memberRes = await fetch(`${FALLEN_BOT_API}/bot/guilds/${guildId}/members`).catch(() => null);
+            const memberRes = await fetchJsonWithTimeout(`${FALLEN_BOT_API}/bot/guilds/${guildId}/members`, {}, 4000).catch(() => null);
             if (memberRes?.ok) {
                 const memberData = await memberRes.json().catch(() => null);
                 memberRows = Array.isArray(memberData?.members) ? memberData.members : [];
+            }
+        }
+
+        if (memberRows.length) {
+            guildLeaderboardMemberCache.set(guildId, { updatedAt: Date.now(), members: memberRows });
+        } else {
+            const cached = guildLeaderboardMemberCache.get(guildId);
+            if (cached && (Date.now() - cached.updatedAt) < GUILD_LEADERBOARD_MEMBER_CACHE_TTL) {
+                memberRows = Array.isArray(cached.members) ? cached.members : [];
             }
         }
 
@@ -1255,7 +1374,13 @@ app.get('/api/guilds/:guildId/leaderboard/profiles', requireKey, async (req, res
                 ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC
             `).all(...memberIds);
         } else {
-            profiles = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
+            return res.json({
+                guildId,
+                profiles: [],
+                count: 0,
+                source: 'guild-unavailable',
+                warning: 'Guild member snapshot unavailable',
+            });
         }
 
         const enriched = profiles.map(profile => {
@@ -1287,25 +1412,10 @@ app.get('/api/guilds/:guildId/leaderboard/profiles', requireKey, async (req, res
             guildId,
             profiles: filtered,
             count: filtered.length,
-            source: memberMap.size ? 'guild' : 'global-fallback',
+            source: 'guild',
         });
     } catch (err) {
-        try {
-            const profiles = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
-            const filtered = query ? profiles.filter(profile => {
-                const haystack = [
-                    profile.display_name,
-                    profile.roblox_username,
-                    profile.roblox_display_name,
-                    profile.main_character,
-                    profile.discord_id,
-                ].filter(Boolean).join(' ').toLowerCase();
-                return haystack.includes(query);
-            }) : profiles;
-            res.json({ guildId, profiles: filtered, count: filtered.length, source: 'global-fallback' });
-        } catch (fallbackErr) {
-            res.status(500).json({ error: fallbackErr.message });
-        }
+        res.status(503).json({ error: err.message, source: 'guild-unavailable' });
     }
 });
 

@@ -476,7 +476,7 @@ function buildLeaderboardCardData(profile, options = {}) {
     const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
     const color = normalizeProfileColor(options.globalColor || profile.custom_color);
-    const introGifUrl = options.showIntroGif ? normalizeMediaUrl(options.globalIntroGifUrl || '') : '';
+    const introGifUrl = normalizeMediaUrl(options.globalIntroGifUrl || '');
     const topImageUrl = normalizeMediaUrl(options.showTopImage ? (options.globalTopImageUrl || profile.leaderboard_top_image_url) : '');
     const description = renderLeaderboardTemplate(options.descriptionTemplate, buildLeaderboardTemplateVariables(profile, {
         displayName,
@@ -506,6 +506,7 @@ function buildLeaderboardCardData(profile, options = {}) {
             description,
             footer: profile.display_name ? `FS · ${profile.display_name}` : 'FS Bot',
             thumbnail: profile.roblox_avatar_url || '',
+            ...(introGifUrl ? { image: introGifUrl } : {}),
         },
         messageEmbeds: [
             ...(topImageUrl ? [{ color, image: topImageUrl }] : []),
@@ -514,8 +515,8 @@ function buildLeaderboardCardData(profile, options = {}) {
                 description,
                 footer: profile.display_name ? `FS · ${profile.display_name}` : 'FS Bot',
                 thumbnail: profile.roblox_avatar_url || '',
+                ...(introGifUrl ? { image: introGifUrl } : {}),
             },
-            ...(introGifUrl ? [{ color, image: introGifUrl }] : []),
         ],
     };
 }
@@ -649,7 +650,6 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
 
         occupiedBySpot.set(spot, buildLeaderboardCardData(profile, {
             showTopImage: occupiedIndex === 0,
-            showIntroGif: occupiedIndex > 0,
             spot,
             rankText,
             globalColor: leaderboardSettings.color || leaderboardSettings.embedColor || leaderboardSettings.leaderboardColor || '',

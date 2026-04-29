@@ -477,7 +477,7 @@ function buildLeaderboardCardData(profile, options = {}) {
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
     const color = normalizeProfileColor(options.globalColor || profile.custom_color);
     const introGifUrl = normalizeMediaUrl(options.globalIntroGifUrl || '');
-    const topImageUrl = normalizeMediaUrl(options.showTopImage ? (options.globalTopImageUrl || profile.leaderboard_top_image_url) : '');
+    const topImageUrl = normalizeMediaUrl(options.showTopImage ? (options.globalTopImageUrl || '') : '');
     const description = renderLeaderboardTemplate(options.descriptionTemplate, buildLeaderboardTemplateVariables(profile, {
         displayName,
         spot,

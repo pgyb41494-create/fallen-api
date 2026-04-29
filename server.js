@@ -1230,6 +1230,85 @@ app.get('/api/guilds/:guildId/leaderboard', requireKey, async (req, res) => {
     }
 });
 
+app.get('/api/guilds/:guildId/leaderboard/profiles', requireKey, async (req, res) => {
+    const guildId = req.params.guildId;
+    const query = String(req.query.query || req.query.q || '').trim().toLowerCase();
+
+    try {
+        let memberRows = [];
+        if (FALLEN_BOT_API) {
+            const memberRes = await fetch(`${FALLEN_BOT_API}/bot/guilds/${guildId}/members`).catch(() => null);
+            if (memberRes?.ok) {
+                const memberData = await memberRes.json().catch(() => null);
+                memberRows = Array.isArray(memberData?.members) ? memberData.members : [];
+            }
+        }
+
+        const memberMap = new Map(memberRows.map(member => [String(member.id || ''), member]));
+        let profiles;
+        if (memberMap.size) {
+            const memberIds = [...memberMap.keys()];
+            const placeholders = memberIds.map(() => '?').join(',');
+            profiles = db.prepare(`
+                SELECT * FROM profiles
+                WHERE discord_id IN (${placeholders})
+                ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC
+            `).all(...memberIds);
+        } else {
+            profiles = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
+        }
+
+        const enriched = profiles.map(profile => {
+            const member = memberMap.get(String(profile.discord_id || '')) || null;
+            return {
+                ...profile,
+                member_display_name: member?.displayName || member?.username || '',
+                member_username: member?.username || '',
+                member_global_name: member?.globalName || '',
+                member_avatar_url: member?.avatarUrl || '',
+            };
+        });
+
+        const filtered = query ? enriched.filter(profile => {
+            const haystack = [
+                profile.member_display_name,
+                profile.member_username,
+                profile.member_global_name,
+                profile.display_name,
+                profile.roblox_username,
+                profile.roblox_display_name,
+                profile.main_character,
+                profile.discord_id,
+            ].filter(Boolean).join(' ').toLowerCase();
+            return haystack.includes(query);
+        }) : enriched;
+
+        res.json({
+            guildId,
+            profiles: filtered,
+            count: filtered.length,
+            source: memberMap.size ? 'guild' : 'global-fallback',
+        });
+    } catch (err) {
+        try {
+            const profiles = db.prepare('SELECT * FROM profiles ORDER BY COALESCE(leaderboard_position, 999999), updated_at DESC').all();
+            const filtered = query ? profiles.filter(profile => {
+                const haystack = [
+                    profile.display_name,
+                    profile.roblox_username,
+                    profile.roblox_display_name,
+                    profile.main_character,
+                    profile.discord_id,
+                ].filter(Boolean).join(' ').toLowerCase();
+                return haystack.includes(query);
+            }) : profiles;
+            res.json({ guildId, profiles: filtered, count: filtered.length, source: 'global-fallback' });
+        } catch (fallbackErr) {
+            res.status(500).json({ error: fallbackErr.message });
+        }
+    }
+});
+
 app.get('/api/profiles/roblox/:username', (req, res) => {
     const profile = db.prepare(`
         SELECT * FROM profiles

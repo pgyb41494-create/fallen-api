@@ -371,6 +371,38 @@ function normalizeMediaUrl(input) {
     }
 }
 
+async function getManageableRolesForGuild(guildId, roles, botUserId = null) {
+    if (!DISCORD_BOT_TOKEN) return [];
+    try {
+        let resolvedBotUserId = botUserId;
+        if (!resolvedBotUserId) {
+            const botUserRes = await fetch('https://discord.com/api/v10/users/@me', {
+                headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+            });
+            if (!botUserRes.ok) return [];
+            const botUser = await botUserRes.json();
+            resolvedBotUserId = botUser?.id;
+        }
+        if (!resolvedBotUserId) return [];
+
+        const botMemberRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${resolvedBotUserId}`, {
+            headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+        });
+        if (!botMemberRes.ok) return [];
+        const botMember = await botMemberRes.json();
+
+        const botRoleIds = new Set(Array.isArray(botMember.roles) ? botMember.roles : []);
+        const botTopPosition = (roles || []).reduce((highest, role) => (
+            botRoleIds.has(role.id) ? Math.max(highest, Number(role.position || 0)) : highest
+        ), 0);
+
+        return (roles || []).filter(role => role.id !== guildId && !role.managed && Number(role.position || 0) < botTopPosition);
+    } catch (err) {
+        console.warn('[Discord] manageable role lookup failed:', err.message);
+        return [];
+    }
+}
+
 function getLeaderboardRegionLabel(region) {
     if (!region) return '—';
     return LEADERBOARD_REGION_LABELS[region] || region;
@@ -387,6 +419,7 @@ function buildLeaderboardCardData(profile, options = {}) {
     const mention = profile.discord_id ? `<@${profile.discord_id}>` : '';
     const robloxLink = profile.roblox_id ? `[${roblox}](https://www.roblox.com/users/${profile.roblox_id}/profile)` : roblox;
     const color = normalizeProfileColor(options.globalColor || profile.custom_color);
+    const introGifUrl = normalizeMediaUrl(options.globalIntroGifUrl && Number(options.sequenceIndex || 0) > 0 ? options.globalIntroGifUrl : '');
     const topImageUrl = normalizeMediaUrl(options.globalTopImageUrl || profile.leaderboard_top_image_url);
     const bottomImageUrl = normalizeMediaUrl(options.globalBottomImageUrl || profile.leaderboard_bottom_image_url);
     const description = [
@@ -409,6 +442,7 @@ function buildLeaderboardCardData(profile, options = {}) {
         mention,
         roblox,
         color,
+        introGifUrl,
         topImageUrl,
         bottomImageUrl,
         description,
@@ -419,6 +453,7 @@ function buildLeaderboardCardData(profile, options = {}) {
             thumbnail: profile.roblox_avatar_url || '',
         },
         messageEmbeds: [
+            ...(introGifUrl ? [{ color, image: introGifUrl }] : []),
             ...(topImageUrl ? [{ color, image: topImageUrl }] : []),
             {
                 color,
@@ -520,11 +555,13 @@ async function getLeaderboardCardsForGuild(guildId, { resolveRanks = false } = {
         }
 
         cards.push(buildLeaderboardCardData(profile, {
+            sequenceIndex: index,
             spot: profile.leaderboard_position || index + 1,
             rankText,
             globalColor: leaderboardSettings.color || leaderboardSettings.embedColor || leaderboardSettings.leaderboardColor || '',
             globalTopImageUrl: leaderboardSettings.topImageUrl || leaderboardSettings.topImage || leaderboardSettings.top || '',
             globalBottomImageUrl: leaderboardSettings.bottomImageUrl || leaderboardSettings.bottomImage || leaderboardSettings.bottom || '',
+            globalIntroGifUrl: leaderboardSettings.introGifUrl || leaderboardSettings.startGifUrl || leaderboardSettings.startGif || '',
         }));
     }
 
@@ -788,7 +825,7 @@ app.get('/api/guilds/:guildId/discord', requireKey, async (req, res) => {
         const [rolesRes, channelsRes, botMemberRes] = await Promise.all([
             fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
             fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
-            fetch(`https://discord.com/api/v10/guilds/${guildId}/members/@me`, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
+            fetch('https://discord.com/api/v10/users/@me', { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }),
         ]);
         if (!rolesRes.ok) return res.status(rolesRes.status).json({ error: 'Failed to fetch roles' });
         if (!channelsRes.ok) return res.status(channelsRes.status).json({ error: 'Failed to fetch channels' });
@@ -797,12 +834,8 @@ app.get('/api/guilds/:guildId/discord', requireKey, async (req, res) => {
         const categories = channels.filter(c => c.type === 4);
         let manageableRoles = [];
         if (botMemberRes?.ok) {
-            const botMember = await botMemberRes.json();
-            const botRoleIds = new Set(botMember.roles || []);
-            const botTopPosition = roles.reduce((highest, role) => (
-                botRoleIds.has(role.id) ? Math.max(highest, Number(role.position || 0)) : highest
-            ), 0);
-            manageableRoles = roles.filter(role => role.id !== guildId && !role.managed && Number(role.position || 0) < botTopPosition);
+            const botUser = await botMemberRes.json();
+            manageableRoles = await getManageableRolesForGuild(guildId, roles, botUser?.id);
         }
         res.json({ roles, manageableRoles, channels, categories });
     } catch (err) {
@@ -837,7 +870,8 @@ app.patch('/api/guilds/:guildId/members/:userId', requireKey, async (req, res) =
         });
         if (!rolesRes.ok) return res.status(rolesRes.status).json({ error: 'Failed to fetch guild roles' });
         const guildRoles = await rolesRes.json();
-        const validRoleIds = new Set(guildRoles.map(role => role.id).filter(roleId => roleId && roleId !== req.params.guildId));
+        const manageableRoles = await getManageableRolesForGuild(req.params.guildId, guildRoles);
+        const validRoleIds = new Set(manageableRoles.map(role => role.id).filter(roleId => roleId && roleId !== req.params.guildId));
         const safeRoles = roleIds.filter(roleId => validRoleIds.has(roleId));
 
         const patchRes = await fetch(`https://discord.com/api/v10/guilds/${req.params.guildId}/members/${req.params.userId}`, {

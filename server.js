@@ -230,6 +230,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS tickets (
     closed_at TEXT
 )`);
 
+// Guild leveling progress
+db.exec(`CREATE TABLE IF NOT EXISTS guild_leveling (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    xp INTEGER NOT NULL DEFAULT 0,
+    level INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+)`);
+
 // Saved embeds
 db.exec(`CREATE TABLE IF NOT EXISTS embeds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -913,6 +923,48 @@ app.get('/api/guilds/:guildId/stats', requireKey, (req, res) => {
     const modCount = db.prepare('SELECT COUNT(*) AS c FROM mod_logs WHERE guild_id = ?').get(guildId).c;
     const ticketCount = db.prepare('SELECT COUNT(*) AS c FROM tickets WHERE guild_id = ?').get(guildId).c;
     res.json({ guildId, warns: warnCount, modActions: modCount, tickets: ticketCount });
+});
+
+// Get saved leveling progress for a guild member
+app.get('/api/guilds/:guildId/leveling/:userId', requireKey, (req, res) => {
+    const row = db.prepare('SELECT * FROM guild_leveling WHERE guild_id = ? AND user_id = ?').get(req.params.guildId, req.params.userId);
+    if (!row) {
+        return res.json({ guildId: req.params.guildId, userId: req.params.userId, xp: 0, level: 0, updatedAt: null, found: false });
+    }
+    res.json({
+        guildId: row.guild_id,
+        userId: row.user_id,
+        xp: Number(row.xp) || 0,
+        level: Number(row.level) || 0,
+        updatedAt: row.updated_at || null,
+        found: true,
+    });
+});
+
+// Save leveling progress for a guild member
+app.patch('/api/guilds/:guildId/leveling/:userId', requireKey, (req, res) => {
+    const { guildId, userId } = req.params;
+    const xp = Number(req.body?.xp ?? 0);
+    const level = Number(req.body?.level ?? 0);
+    if (!Number.isFinite(xp) || !Number.isFinite(level) || xp < 0 || level < 0) {
+        return res.status(400).json({ error: 'Invalid leveling data' });
+    }
+
+    db.prepare(`INSERT INTO guild_leveling (guild_id, user_id, xp, level, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET xp=excluded.xp, level=excluded.level, updated_at=datetime('now')`)
+        .run(guildId, userId, Math.floor(xp), Math.floor(level));
+
+    const row = db.prepare('SELECT * FROM guild_leveling WHERE guild_id = ? AND user_id = ?').get(guildId, userId);
+    res.json({
+        ok: true,
+        leveling: {
+            guildId: row.guild_id,
+            userId: row.user_id,
+            xp: Number(row.xp) || 0,
+            level: Number(row.level) || 0,
+            updatedAt: row.updated_at || null,
+        },
+    });
 });
 
 // Get saved panels for a guild
